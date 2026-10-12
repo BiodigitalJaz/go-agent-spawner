@@ -83,6 +83,8 @@ type createRequest struct {
 	Chunks   int    `json:"chunks,omitempty"`
 	// Merge overrides how split results are combined: llm, concat or list.
 	Merge string `json:"merge,omitempty"`
+	// Parts are given pieces of input, one agent each (e.g. files).
+	Parts []agent.Part `json:"parts,omitempty"`
 }
 
 func (s *Server) createTree(w http.ResponseWriter, r *http.Request) {
@@ -98,6 +100,16 @@ func (s *Server) createTree(w http.ResponseWriter, r *http.Request) {
 	if req.Chunks < 0 || req.Chunks > 64 {
 		httpError(w, http.StatusBadRequest, "chunks must be between 0 and 64")
 		return
+	}
+	if len(req.Parts) > 64 {
+		httpError(w, http.StatusBadRequest, "at most 64 parts")
+		return
+	}
+	for i, p := range req.Parts {
+		if strings.TrimSpace(p.Title) == "" || len(p.Title) > 300 {
+			httpError(w, http.StatusBadRequest, fmt.Sprintf("part %d needs a title of 1-300 characters", i+1))
+			return
+		}
 	}
 	stored, err := settings.Load(r.Context(), s.db, s.defaults)
 	if err != nil {
@@ -127,7 +139,7 @@ func (s *Server) createTree(w http.ResponseWriter, r *http.Request) {
 	}
 
 	started, err := agent.StartTree(r.Context(), s.db, s.river, agent.TreeRequest{
-		Prompt: req.Prompt, Priority: req.Priority, Settings: set, Document: req.Document, Chunks: req.Chunks,
+		Prompt: req.Prompt, Priority: req.Priority, Settings: set, Document: req.Document, Chunks: req.Chunks, Parts: req.Parts,
 	})
 	if err != nil {
 		s.log.Error("start tree", "err", err)
@@ -144,7 +156,7 @@ func (s *Server) createTree(w http.ResponseWriter, r *http.Request) {
 			kids[i] = events.Child{ID: c.ID, Title: c.Title, Role: c.Role, Prompt: truncate(c.Prompt, 400)}
 		}
 		_ = s.bus.Publish(r.Context(), events.Event{Type: events.NodeSplit, TreeID: root.TreeID, NodeID: root.ID, Role: string(agent.RolePlan),
-			Text: fmt.Sprintf("document split in code into %d parts of about %d characters", len(kids), len(req.Document)/len(kids)), Children: kids})
+			Text: splitReason(req, len(kids)), Children: kids})
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"tree_id":    root.TreeID,
@@ -671,6 +683,13 @@ func treeID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
 		return uuid.Nil, false
 	}
 	return id, true
+}
+
+func splitReason(req createRequest, n int) string {
+	if len(req.Parts) > 0 {
+		return fmt.Sprintf("%d given parts, one agent each", n)
+	}
+	return fmt.Sprintf("document split in code into %d parts of about %d characters", n, len(req.Document)/n)
 }
 
 func truncate(s string, n int) string {

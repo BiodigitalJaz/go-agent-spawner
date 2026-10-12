@@ -6,6 +6,14 @@ _Last updated: 2026-10-12_
 **Deployed and live** on the user's cluster: namespace `agent-spawner`, console at http://192.168.1.64:30880 (NodePort 30880 on any node). See deployment.md for every detail. Next steps depend on the user.
 
 ## Recent changes
+### 2026-10-12: MCP server (0.1.10, branch `feat/mcp-server`, PR)
+- `internal/mcpserver` (official Go SDK v1.8.0): tools run_task, analyze_files (stdio only), get_task, cancel_task, list_models. Progress notifications per finished agent; auto chunk sizing (`AutoChunks`: ≤6k tokens → 1, ≤30k → 4, else ceil(t/7500) up to 16).
+- `spawner mcp` = stdio server, a thin client of the API (`SPAWNER_URL`, token from `SPAWNER_TOKEN` / `SPAWNER_TOKEN_FILE` / `~/.config/agent-spawner/token`). Needs no DB.
+- `/mcp` on the API: stateless Streamable HTTP (2 replicas, no affinity), protected by auth middleware; tools call the API on loopback with the caller's own Authorization header. Registered per method because a bare `/mcp` conflicts with `GET /` in the Go mux (panicked at startup; caught by the e2e run).
+- API: `parts: [{title,text}]` (≤64) = caller-given split, one agent each.
+- Cluster overlay sets `PUBLIC_URL` for console links. Image gets `-X main.version`.
+- The user's sign-in problem was only the base64 secret value; they decoded it and it works. A base64-accepting login was tried, then dropped at the user's word.
+- Verified: unit + in-memory MCP tests, Parts integration test, local e2e (stdio + HTTP, fake LLM), cluster e2e against LM Studio (4.3 s / 2.9 s / 2.8 s).
 ### 2026-10-12: GitHub repo, CI, authentication (0.1.9)
 - Public repo https://github.com/BiodigitalJaz/go-agent-spawner (SSH remote); module renamed to `github.com/BiodigitalJaz/go-agent-spawner`.
 - CI (`.github/workflows/ci.yml`, actions v7): gofmt, vet, build, race tests with Postgres service + NATS container, JS/kustomize/Python checks, image build + smoke. The first run passed (test 116 s).
@@ -77,7 +85,7 @@ _Last updated: 2026-10-12_
 ## Next steps (suggested; nothing confirmed by the user)
 0. **From the stress tests (2026-10-12):** (a) reduce-context guard / hierarchical merge (silent topic loss seen); (b) per-model global concurrency: cap the sum of worker limits at the server's parallel slots (e.g. set `max_limit` = slots ÷ worker replicas, or derive it from discovery's `parallel`); (c) done: parallel 8 / ctx 32k measured (+27% burst throughput, TTFT max 6.9→1.4 s, context loss gone in the retest); (d) suggested: raise qwen9b-fast `initial_limit` 2→4 so the pool starts at the 8-slot capacity instead of ramping over about 45 s.
 1. ~~Planner speed~~ solved: qwen9b-fast plans in 4–8 s (against 67–78 s on the 27B with reasoning). Possibly compare quality: worker on `qwen9b` (reasoning on) against `qwen9b-fast`.
-2. ~~Auth~~ done in 0.1.9. Next candidates: MCP tool interface, auto document-mode/chunk sizing, streaming list merge, overlapping chunk boundaries, structured merge, tokenizer-based admission, cross-chunk reasoning experiment, 3070 Ti emulation test.
+2. ~~Auth~~ done in 0.1.9. MCP done in 0.1.10 (auto chunk sizing lives in the MCP layer). Next candidates: auto chunk sizing in the API itself, streaming list merge, overlapping chunk boundaries, structured merge, tokenizer-based admission, cross-chunk reasoning experiment, 3070 Ti emulation test.
 3. Pin LM Studio's IP (DHCP reservation) or give it a DNS name; validate DNS discovery with an in-cluster backend later.
 4. Prometheus metrics; limiter normalization for prompt length.
 5. Possibly: manage backends from the UI; per-run directive overrides; markdown rendering of results; a cmd/fakellm dev tool committed to the repo (it currently exists only in the session scratchpad).

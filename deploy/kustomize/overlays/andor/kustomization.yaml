@@ -12,7 +12,7 @@ resources:
   - ../../base
 images:
   - name: ghcr.io/biodigitaljaz/agent-spawner
-    newTag: 0.1.9
+    newTag: 0.1.10
 configMapGenerator:
   - name: spawner-backends
     behavior: replace
@@ -29,3 +29,11 @@ patches:
       - op: add
         path: /spec/ports/0/nodePort
         value: 30880
+  # Console links in MCP tool results point at the NodePort.
+  - target:
+      kind: Deployment
+      name: spawner-api
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: {name: PUBLIC_URL, value: "http://192.168.1.64:30880"}

@@ -129,7 +129,7 @@ func Public(path string) bool {
 	case "/healthz", "/readyz", "/v1/login", "/v1/logout", "/v1/session":
 		return true
 	}
-	return !strings.HasPrefix(path, "/v1/") && !strings.HasPrefix(path, "/debug/")
+	return !strings.HasPrefix(path, "/v1/") && !strings.HasPrefix(path, "/debug/") && path != "/mcp" && !strings.HasPrefix(path, "/mcp/")
 }
 
 // Middleware enforces authentication on every non-public path.

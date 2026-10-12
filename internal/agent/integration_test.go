@@ -591,6 +591,45 @@ func TestDocumentModeChunksInCode(t *testing.T) {
 	}
 }
 
+func TestGivenPartsOneAgentEach(t *testing.T) {
+	h := setup(t, &fakeLLM{})
+	set := h.set
+	set.Merge = settings.MergeConcat
+	parts := []agent.Part{
+		{Title: "cmd/main.go", Text: "package main // svc-001"},
+		{Title: "internal/x.go", Text: "package x // svc-002"},
+		{Title: "README.md", Text: "# svc-003"},
+	}
+	started, err := agent.StartTree(context.Background(), h.db, h.client, agent.TreeRequest{
+		Prompt: "Review this file.", Priority: 1, Settings: set, Parts: parts,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(started.Children) != 3 {
+		t.Fatalf("expected one agent per part, got %d", len(started.Children))
+	}
+	evs := h.collect(t, started.Root.TreeID)
+	if last := evs[len(evs)-1]; last.Type != events.TreeDone {
+		t.Fatalf("tree failed: %+v", last)
+	}
+	nodes, _ := store.TreeNodes(context.Background(), h.db, started.Root.TreeID)
+	for _, n := range nodes {
+		if n.ParentID == nil {
+			continue
+		}
+		p := parts[n.Idx]
+		if n.Title != p.Title || !strings.Contains(n.Prompt, p.Text) || !strings.Contains(n.Prompt, "item "+fmt.Sprint(n.Idx+1)+" of 3") {
+			t.Fatalf("part %d: title %q, prompt:\n%s", n.Idx, n.Title, n.Prompt)
+		}
+		for j, other := range parts {
+			if j != n.Idx && strings.Contains(n.Prompt, other.Text) {
+				t.Fatalf("part %d's prompt leaks part %d", n.Idx, j)
+			}
+		}
+	}
+}
+
 func TestMergeGuardConsolidatesInParallelBatches(t *testing.T) {
 	h := setup(t, &fakeLLM{})
 	// Shrink the reducer model's context so 8 chunk results cannot fit one merge.

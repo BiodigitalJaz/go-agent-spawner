@@ -79,7 +79,7 @@ func TestBearerAndPublicPaths(t *testing.T) {
 			t.Errorf("%s should be public, got %d", p, w.Code)
 		}
 	}
-	for _, p := range []string{"/v1/trees", "/debug/backends"} {
+	for _, p := range []string{"/v1/trees", "/debug/backends", "/mcp"} {
 		if w := do(h, "GET", p, nil); w.Code != 401 {
 			t.Errorf("%s without auth: want 401, got %d", p, w.Code)
 		}
