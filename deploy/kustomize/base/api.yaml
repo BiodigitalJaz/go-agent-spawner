@@ -46,6 +46,11 @@ spec:
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef: {name: spawner-db, key: url}
+            # Comma-separated bearer tokens. Optional: without the Secret the
+            # API runs unauthenticated and logs a warning.
+            - name: AUTH_TOKENS
+              valueFrom:
+                secretKeyRef: {name: spawner-auth, key: tokens, optional: true}
           volumeMounts:
             - {name: backends, mountPath: /etc/spawner}
           readinessProbe:

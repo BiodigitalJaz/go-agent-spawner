@@ -50,6 +50,11 @@ type Config struct {
 	EventRetention time.Duration
 	EventReplicas  int
 	EventFileStore bool
+
+	// AuthTokens are accepted bearer tokens (comma-separated AUTH_TOKENS,
+	// from a Secret). Empty disables authentication.
+	AuthTokens     []string
+	AuthSessionTTL time.Duration
 }
 
 var modelName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,55}$`)
@@ -76,6 +81,8 @@ func Load() (*Config, error) {
 		EventRetention:    envDur("EVENT_RETENTION", 15*time.Minute),
 		EventReplicas:     envInt("EVENT_REPLICAS", 1),
 		EventFileStore:    envBool("EVENT_FILE_STORE", false),
+		AuthTokens:        list(os.Getenv("AUTH_TOKENS")),
+		AuthSessionTTL:    envDur("AUTH_SESSION_TTL", 7*24*time.Hour),
 	}
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")

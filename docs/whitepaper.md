@@ -163,7 +163,7 @@ The results hold for one task type on one model and one GPU, so they bound the c
 - **Small samples.** 2–3 repetitions per cell. The trends are consistent across sizes, but single cells have wide intervals.
 - **Synthetic documents.** The filler is repetitive. Real documents may be easier or harder for long-context attention.
 - **Token estimates.** Admission uses characters ÷ 4 plus reserved output. That is conservative for prose and optimistic for dense code; the server's overflow error remains the backstop.
-- **No authentication** on the console or API yet.
+- **Authentication** was absent during these experiments; token and session auth was added in 0.1.9.
 
 Next steps, in priority order: repeat the experiment on cross-chunk reasoning tasks; measure a larger model on the same GPU; count tokens with the model's tokenizer instead of estimating; add a validated merge for structured outputs (schema-checked JSON rows).
 

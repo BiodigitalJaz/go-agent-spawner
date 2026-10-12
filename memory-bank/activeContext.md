@@ -6,6 +6,11 @@ _Last updated: 2026-10-12_
 **Deployed and live** on the user's cluster: namespace `agent-spawner`, console at http://192.168.1.64:30880 (NodePort 30880 on any node). See deployment.md for every detail. Next steps depend on the user.
 
 ## Recent changes
+### 2026-10-12: GitHub repo, CI, authentication (0.1.9)
+- Public repo https://github.com/BiodigitalJaz/go-agent-spawner (SSH remote); module renamed to `github.com/BiodigitalJaz/go-agent-spawner`.
+- CI (`.github/workflows/ci.yml`, actions v7): gofmt, vet, build, race tests with Postgres service + NATS container, JS/kustomize/Python checks, image build + smoke. The first run passed (test 116 s).
+- `internal/auth`: bearer tokens (`AUTH_TOKENS`), stateless HMAC session cookie (key derived from the token set; revocation by removing the token), SameSite=Strict + Origin check on cookie writes, Secure only over HTTPS. Public: /healthz, /readyz, /v1/login|logout|session, static UI. Console: sign-in overlay, sign-out button, 401 → re-login.
+- Verified locally and on the cluster: 401/200 matrix, browser sign-in flow, cookie flags, cross-site write 403, bearer SSE scripted run, all earlier browser suites with login.
 ### 2026-10-12: shared context (0.1.7/0.1.8), preStop; experiment v2 results
 - **Finding:** LM Studio's context (32k) is **one pool shared by all parallel slots**. Four 10.7k-token chunks at once → mid-stream `{"code":500,"message":"Context size has been exceeded."}` (transient). A single request > ctx → embedded `returned 400 … exceeds the available context size` (permanent).
 - **Bug I introduced in 0.1.4** (keyword "context size" → 400) made the transient 500 permanent → chunked 42k/62k runs lost every part in v2 (recall 0). Fixed: `streamErrorCode` precedence is code field → "returned NNN" → nested `"code":NNN` → keywords. `llm.ContextPressure` → `JobSnooze(~2 s)`, up to 30 per job (metadata "snoozes").
@@ -72,7 +77,7 @@ _Last updated: 2026-10-12_
 ## Next steps (suggested; nothing confirmed by the user)
 0. **From the stress tests (2026-10-12):** (a) reduce-context guard / hierarchical merge (silent topic loss seen); (b) per-model global concurrency: cap the sum of worker limits at the server's parallel slots (e.g. set `max_limit` = slots ÷ worker replicas, or derive it from discovery's `parallel`); (c) done: parallel 8 / ctx 32k measured (+27% burst throughput, TTFT max 6.9→1.4 s, context loss gone in the retest); (d) suggested: raise qwen9b-fast `initial_limit` 2→4 so the pool starts at the 8-slot capacity instead of ramping over about 45 s.
 1. ~~Planner speed~~ solved: qwen9b-fast plans in 4–8 s (against 67–78 s on the 27B with reasoning). Possibly compare quality: worker on `qwen9b` (reasoning on) against `qwen9b-fast`.
-2. Add auth to the console and API (currently none; anyone on the LAN who can reach NodePort 30880 can edit directives).
+2. ~~Auth~~ done in 0.1.9. Next candidates: MCP tool interface, auto document-mode/chunk sizing, streaming list merge, overlapping chunk boundaries, structured merge, tokenizer-based admission, cross-chunk reasoning experiment, 3070 Ti emulation test.
 3. Pin LM Studio's IP (DHCP reservation) or give it a DNS name; validate DNS discovery with an in-cluster backend later.
 4. Prometheus metrics; limiter normalization for prompt length.
 5. Possibly: manage backends from the UI; per-run directive overrides; markdown rendering of results; a cmd/fakellm dev tool committed to the repo (it currently exists only in the session scratchpad).
@@ -80,7 +85,6 @@ _Last updated: 2026-10-12_
 ## Open questions for the user
 - GPU inventory: in-cluster vLLM, or LM Studio workstations?
 - NATS HA needed?
-- Auth approach for the console (OIDC proxy? basic auth?).
 
 ## Preferences and patterns learned
 - The user discusses design first, then wants it built. They delegate technical choices, so recommend rather than list options.

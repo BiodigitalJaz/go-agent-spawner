@@ -8,9 +8,12 @@ asks for the full list; answers are scored against ground truth.
 Conditions per document size: single (whole doc in one context), chunks=4,
 chunks=8. Runs execute one at a time so latency is not confounded by load.
 """
-import json, random, re, sys, time, urllib.request, datetime
+import json, os, random, re, sys, time, urllib.request, datetime
 
-BASE = "http://192.168.1.64:30880"
+BASE = os.environ.get("SPAWNER_URL", "http://192.168.1.64:30880")
+# The API requires a bearer token when auth is enabled (AUTH_TOKENS).
+TOKEN = os.environ.get("SPAWNER_TOKEN", "")
+AUTH = {"Authorization": f"Bearer {TOKEN}"} if TOKEN else {}
 NEEDLES = 30
 
 INSTRUCTION = ("Extract every service mentioned in the document together with its port and owning team. "
@@ -75,7 +78,7 @@ def score(answer, truth):
             "hallucinated": sum(1 for s in found if s not in truth)}
 
 def post(path, body):
-    req = urllib.request.Request(BASE + path, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(BASE + path, data=json.dumps(body).encode(), headers={"Content-Type": "application/json", **AUTH})
     with urllib.request.urlopen(req, timeout=60) as r:
         return json.load(r)
 
@@ -89,7 +92,7 @@ def run(doc, chunks, merge=None):
     t0 = time.time()
     tid = post("/v1/trees", body)["tree_id"]
     evs = []
-    with urllib.request.urlopen(f"{BASE}/v1/trees/{tid}/events", timeout=1800) as r:
+    with urllib.request.urlopen(urllib.request.Request(f"{BASE}/v1/trees/{tid}/events", headers=AUTH), timeout=1800) as r:
         etype = None
         for raw in r:
             line = raw.decode().rstrip("\n")

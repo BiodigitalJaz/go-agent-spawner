@@ -29,6 +29,10 @@ async function api(method, path, body) {
     headers: body ? { "Content-Type": "application/json" } : {},
     body: body ? JSON.stringify(body) : undefined,
   });
+  if (res.status === 401 && path !== "/v1/login") {
+    showLogin("Your session has ended. Sign in again.");
+    throw Object.assign(new Error("Sign in required"), { status: 401 });
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const err = new Error(data.error || `${res.status} ${res.statusText}`);
@@ -153,7 +157,12 @@ function connectLifecycle() {
   const es = new EventSource("/v1/events");
   const conn = $("#v-conn");
   es.onopen = () => { conn.textContent = "live"; conn.classList.add("live"); };
-  es.onerror = () => { conn.textContent = "reconnecting"; conn.classList.remove("live"); };
+  es.onerror = async () => {
+    conn.textContent = "reconnecting";
+    conn.classList.remove("live");
+    // An expired session looks like a dropped stream: check before retrying.
+    if (!(await checkSessionQuiet())) { es.close(); showLogin("Your session has ended. Sign in again."); }
+  };
   const onAny = () => scheduleTreeRefresh();
   for (const t of ["tree.created", "node.started", "node.split", "node.done", "node.failed", "tree.done", "tree.failed", "tree.cancelled"]) {
     es.addEventListener(t, onAny);
@@ -1313,11 +1322,67 @@ function modelForm({ mode, name, model, endpoints, initial, max, context, slots,
     h("div", { class: "form-actions" }, h("button", { class: "btn small", onclick: onCancel }, "Cancel"), save));
 }
 
+// ---------- authentication ----------
+// The API accepts a bearer token; the browser trades one for an HttpOnly
+// session cookie (EventSource cannot send headers). After signing in, the
+// page reloads so every live stream reconnects with the session.
+let loginShown = false;
+function showLogin(message) {
+  if (loginShown) return;
+  loginShown = true;
+  const input = h("input", { type: "password", autocomplete: "current-password", placeholder: "Access token", "aria-label": "Access token" });
+  const err = h("div", { class: "login-error", role: "alert" }, message || "");
+  const go = h("button", { class: "btn primary", type: "submit" }, "Sign in");
+  const form = h("form", { class: "panel login-box", onsubmit: async (e) => {
+    e.preventDefault();
+    go.disabled = true;
+    setText(err, "");
+    try {
+      const res = await fetch("/v1/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token: input.value.trim() }) });
+      if (res.ok) { location.reload(); return; }
+      setText(err, res.status === 401 ? "That token isn't valid." : `Sign-in failed (${res.status}).`);
+    } catch { setText(err, "Can't reach the server."); }
+    go.disabled = false;
+    input.select();
+  } },
+    h("h1", {}, "Sign in to Agent Spawner"),
+    h("p", { class: "muted" }, "Enter an access token. Ask the administrator, or read it from the cluster secret ", h("code", {}, "spawner-auth"), "."),
+    input, err, go);
+  document.body.append(h("div", { class: "login-overlay" }, form));
+  input.focus();
+}
+
+async function checkSessionQuiet() {
+  try {
+    const s = await (await fetch("/v1/session")).json();
+    return !s.auth || s.authenticated;
+  } catch {
+    return true;
+  }
+}
+
+async function checkSession() {
+  try {
+    const s = await (await fetch("/v1/session")).json();
+    if (s.auth && s.authenticated) {
+      const out = h("button", { class: "icon-btn signout", title: "Sign out", "aria-label": "Sign out",
+        onclick: async () => { await fetch("/v1/logout", { method: "POST" }); location.reload(); } }, "⎋");
+      $("#theme-toggle").before(out);
+    }
+    return !s.auth || s.authenticated;
+  } catch {
+    return true; // server unreachable: let the normal error paths report it
+  }
+}
+
 // ---------- boot ----------
-window.addEventListener("hashchange", route);
-setInterval(refreshModels, 5000);
-connectLifecycle();
-Promise.allSettled([refreshTrees(), refreshModels(), loadSettings()]).then(() => {
-  route();
-  app.view?.onModels?.();
+checkSession().then((ok) => {
+  if (!ok) { showLogin(); return; }
+  window.addEventListener("hashchange", route);
+  setInterval(refreshModels, 5000);
+  connectLifecycle();
+  Promise.allSettled([refreshTrees(), refreshModels(), loadSettings()]).then(() => {
+    route();
+    app.view?.onModels?.();
+  });
 });

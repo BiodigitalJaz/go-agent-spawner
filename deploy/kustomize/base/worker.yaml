@@ -35,6 +35,11 @@ spec:
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef: {name: spawner-db, key: url}
+            # Comma-separated bearer tokens. Optional: without the Secret the
+            # API runs unauthenticated and logs a warning.
+            - name: AUTH_TOKENS
+              valueFrom:
+                secretKeyRef: {name: spawner-auth, key: tokens, optional: true}
             # Optionally pin this Deployment to a subset of models, e.g. one
             # worker Deployment per GPU pool: WORKER_QUEUES=large
             - name: WORKER_QUEUES

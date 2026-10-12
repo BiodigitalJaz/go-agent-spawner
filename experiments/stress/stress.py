@@ -1,17 +1,20 @@
 """Load harness for the agent spawner: submits trees, follows their SSE
 streams, and records per-node and per-tree metrics plus limiter samples."""
-import json, sys, threading, time, urllib.request, statistics, datetime
+import json, os, sys, threading, time, urllib.request, statistics, datetime
 from concurrent.futures import ThreadPoolExecutor
 
-BASE = "http://192.168.1.64:30880"
+BASE = os.environ.get("SPAWNER_URL", "http://192.168.1.64:30880")
+# The API requires a bearer token when auth is enabled (AUTH_TOKENS).
+TOKEN = os.environ.get("SPAWNER_TOKEN", "")
+AUTH = {"Authorization": f"Bearer {TOKEN}"} if TOKEN else {}
 
 def post(path, body):
-    req = urllib.request.Request(BASE + path, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(BASE + path, data=json.dumps(body).encode(), headers={"Content-Type": "application/json", **AUTH})
     with urllib.request.urlopen(req, timeout=30) as r:
         return json.load(r)
 
 def get(path):
-    with urllib.request.urlopen(BASE + path, timeout=10) as r:
+    with urllib.request.urlopen(urllib.request.Request(BASE + path, headers=AUTH), timeout=10) as r:
         return json.load(r)
 
 def ts(s):
@@ -21,7 +24,7 @@ def run_tree(prompt, depth, children, timeout=1800):
     t0 = time.time()
     tid = post("/v1/trees", {"prompt": prompt, "max_depth": depth, "max_children": children, "priority": 1})["tree_id"]
     evs = []
-    with urllib.request.urlopen(f"{BASE}/v1/trees/{tid}/events", timeout=timeout) as r:
+    with urllib.request.urlopen(urllib.request.Request(f"{BASE}/v1/trees/{tid}/events", headers=AUTH), timeout=timeout) as r:
         etype = None
         for raw in r:
             line = raw.decode().rstrip("\n")

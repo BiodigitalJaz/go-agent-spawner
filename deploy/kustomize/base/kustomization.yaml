@@ -30,7 +30,12 @@ configMapGenerator:
 images:
   - name: agent-spawner
     newName: ghcr.io/biodigitaljaz/agent-spawner
-    newTag: 0.1.8
+    newTag: 0.1.9
+# Access tokens for the API and console (comma-separated; optional but
+# strongly recommended):
+#   kubectl -n agents create secret generic spawner-auth \
+#     --from-literal=tokens="$(openssl rand -hex 32)"
+#
 # DATABASE_URL comes from a Secret you create for your existing Postgres:
 #   kubectl -n agents create secret generic spawner-db \
 #     --from-literal=url='postgres://spawner:...@postgres-rw.db.svc:5432/spawner'

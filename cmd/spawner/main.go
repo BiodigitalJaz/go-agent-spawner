@@ -28,6 +28,7 @@ import (
 
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/agent"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/api"
+	"github.com/BiodigitalJaz/go-agent-spawner/internal/auth"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/backend"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/config"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/events"
@@ -132,7 +133,14 @@ func run(mode string) error {
 		return err
 	}
 
+	authn := auth.New(log, cfg.AuthTokens, cfg.AuthSessionTTL)
+	if authn.Enabled() {
+		log.Info("authentication enabled", "tokens", len(cfg.AuthTokens))
+	} else {
+		log.Warn("authentication DISABLED: set AUTH_TOKENS to protect the API and console")
+	}
 	mux := http.NewServeMux()
+	authn.Routes(mux)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
 		if err := db.Ping(r.Context()); err != nil {
@@ -189,7 +197,7 @@ func run(mode string) error {
 	defer cancelRequests()
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           mux,
+		Handler:           authn.Middleware(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 		BaseContext:       func(net.Listener) context.Context { return baseCtx },
 	}

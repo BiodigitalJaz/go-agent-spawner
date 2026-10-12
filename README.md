@@ -51,7 +51,16 @@ The API serves a web console at `/`. It's embedded in the binary and needs no bu
 - **Agents & directives:** choose the model, temperature and max tokens for each role (planner, worker, reducer), edit each role's directive (system prompt), and set split depth and fan-out. Settings are versioned, so concurrent edits are detected. Each run snapshots the settings when it starts, so edits never change a run in progress.
 - **Models & capacity:** every model in the pool, with each worker's live limiter state per endpoint (slots in use, learned limit, baseline TTFT, ejected). Below that, **Discover** lists every model your backends offer. You can load or unload models on LM Studio hosts and **add any of them to the pool** with a routing name, concurrency limits and a reasoning setting ("off" sends `reasoning_effort: "none"`). Workers start serving new models within seconds, with no restart. Models from `backends.json` are read-only; console-added ones can be edited or removed.
 
-The console has no authentication. Expose it only on a trusted network, or behind an authenticating proxy.
+### Authentication
+
+Set `AUTH_TOKENS` (comma-separated; in Kubernetes the `spawner-auth` Secret) to require a token for everything under `/v1` and `/debug`. Health checks and the console's static shell stay public.
+
+- **Scripts and agents:** `Authorization: Bearer <token>` on every request, including SSE streams.
+- **Browser:** the console asks for a token once and trades it for a signed session cookie (`HttpOnly`, `SameSite=Strict`, `Secure` behind HTTPS), valid for `AUTH_SESSION_TTL` (default 7 days). Sessions work across API replicas with no shared store.
+- **Revoking:** remove a token from the Secret and restart the pods. Every session created with that token stops working.
+- Cookie-authenticated writes from another origin are refused.
+
+Without `AUTH_TOKENS` the API is open and logs a warning at startup.
 
 ### Merge strategies
 
@@ -127,13 +136,14 @@ Environment: `DATABASE_URL` (required), `NATS_URL`, `HTTP_ADDR`, `MAX_DEPTH`
 `ACQUIRE_WAIT`, `SNOOZE`, `JOB_TIMEOUT`, `WORKER_QUEUES` (serve a subset of
 models), `RIVER_POLL_ONLY` (needed behind PgBouncer transaction pooling),
 `RIVER_FETCH_COOLDOWN`, `RIVER_FETCH_POLL_INTERVAL`, `EVENT_RETENTION`,
-`EVENT_REPLICAS`, `SHUTDOWN_TIMEOUT`. See
+`EVENT_REPLICAS`, `SHUTDOWN_TIMEOUT`, `AUTH_TOKENS`, `AUTH_SESSION_TTL`. See
 [internal/config/config.go](internal/config/config.go).
 
 ## Deploy
 
 ```sh
 kubectl -n agents create secret generic spawner-db --from-literal=url='postgres://...'
+kubectl -n agents create secret generic spawner-auth --from-literal=tokens="$(openssl rand -hex 32)"
 kubectl apply -k deploy/kustomize/base      # or deploy/kustomize/keda with KEDA installed
 ```
 
