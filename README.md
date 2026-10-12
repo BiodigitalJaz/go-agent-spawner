@@ -99,7 +99,7 @@ parallelism the server allows.
 
 | Method | Path | |
 |---|---|---|
-| POST | `/v1/trees` | `{"prompt", "priority"? (1-4), "model"?, "max_depth"?, "max_children"?, "document"?, "chunks"?}` → `{tree_id, events_url}`. The optional fields override the saved settings for this run only. **Document mode:** `prompt` is the instruction and `document` is split *in code* into `chunks` parts (paragraph boundaries), each handled by its own agent and merged by the reducer, with no planner. `chunks` ≤ 1 puts the whole document into one agent's context. **`merge`** overrides how split results are combined: `llm` (default; the reducer model writes the answer), `list` (in code: union of lines, duplicates dropped; for list-shaped answers) or `concat` (in code: outputs joined verbatim). Code merges take no GPU slot and add no model latency; failed parts appear as `[part N failed: …]` |
+| POST | `/v1/trees` | `{"prompt", "priority"? (1-4), "model"?, "max_depth"?, "max_children"?, "document"?, "chunks"?}` → `{tree_id, events_url}`. The optional fields override the saved settings for this run only. **Document mode:** `prompt` is the instruction and `document` is split *in code* into `chunks` parts (paragraph boundaries), each handled by its own agent and merged by the reducer, with no planner. `chunks` ≤ 1 puts the whole document into one agent's context. **`merge`** overrides how split results are combined: `llm` (default; the reducer model writes the answer), `list` (in code: union of lines, duplicates dropped; for list-shaped answers) or `concat` (in code: outputs joined verbatim). Code merges take no GPU slot and add no model latency; failed parts appear as `[part N failed: …]`. **`parts`** (`[{"title", "text"}]`, up to 64) gives the split yourself, one agent per part, e.g. one per file |
 | GET | `/v1/trees?limit=` | Recent trees with node counts by status |
 | GET | `/v1/trees/{id}` | Tree prompt, settings snapshot, and every node with outputs, timeline timestamps and stats |
 | GET | `/v1/trees/{id}/events` | SSE stream: `node.started`, `thinking`, `delta`, `node.split`, `node.done`, `node.failed`, `tree.done`/`tree.failed`/`tree.cancelled` |
@@ -110,6 +110,40 @@ parallelism the server allows.
 | POST / PUT / DELETE | `/v1/models[/{name}]` | Add, edit or remove console-managed models. Workers pick changes up within seconds. Delete is refused while the model is in use (by settings, a running tree, or queued jobs) |
 | GET | `/v1/discovery[?url=]` | Models offered by each backend host (LM Studio: size, quantization, load state, parallel slots, reasoning options) |
 | POST | `/v1/discovery/load`, `/v1/discovery/unload` | LM Studio only: `{url, model, context_length?}` / `{url, instance_id}` |
+
+## MCP server
+
+The spawner is also an [MCP](https://modelcontextprotocol.io) server, so a
+coding agent (Claude Code, Cursor, any MCP client) can hand work to the local
+models. Tools:
+
+| Tool | |
+|---|---|
+| `run_task` | Run a prompt, optionally over a `document` (chunked automatically: one context up to ~6k tokens, otherwise 4+ parts) or your own `parts`. Waits for the result and reports progress (agents finished / planned); `wait: false` returns the task id at once |
+| `analyze_files` | stdio only. Reads local files, directories or globs (skipping hidden, vendor and binary files) and runs the instruction on each file in its own agent; results are concatenated per file by default |
+| `get_task` | Status and result of a task, optionally with each part's output |
+| `cancel_task` | Cancel a task |
+| `list_models` | Models, role assignments and online workers |
+
+**stdio** (runs on your machine, talks to the API, can read local files):
+
+```sh
+go install github.com/BiodigitalJaz/go-agent-spawner/cmd/spawner@latest
+claude mcp add spawner -e SPAWNER_URL=http://192.168.1.64:30880 -- spawner mcp
+```
+
+The token comes from `SPAWNER_TOKEN`, the file named by `SPAWNER_TOKEN_FILE`,
+or `~/.config/agent-spawner/token`. `SPAWNER_CONSOLE_URL` overrides the
+console link in results.
+
+**Streamable HTTP** at `/mcp` on the API (stateless, so any replica serves
+any request). Tools act with the caller's own bearer token; `analyze_files`
+is not offered because the files would be the server's:
+
+```sh
+claude mcp add --transport http spawner http://192.168.1.64:30880/mcp \
+  --header "Authorization: Bearer $(cat ~/.config/agent-spawner/token)"
+```
 
 ## Configuration
 
@@ -136,7 +170,8 @@ Environment: `DATABASE_URL` (required), `NATS_URL`, `HTTP_ADDR`, `MAX_DEPTH`
 `ACQUIRE_WAIT`, `SNOOZE`, `JOB_TIMEOUT`, `WORKER_QUEUES` (serve a subset of
 models), `RIVER_POLL_ONLY` (needed behind PgBouncer transaction pooling),
 `RIVER_FETCH_COOLDOWN`, `RIVER_FETCH_POLL_INTERVAL`, `EVENT_RETENTION`,
-`EVENT_REPLICAS`, `SHUTDOWN_TIMEOUT`, `AUTH_TOKENS`, `AUTH_SESSION_TTL`. See
+`EVENT_REPLICAS`, `SHUTDOWN_TIMEOUT`, `AUTH_TOKENS`, `AUTH_SESSION_TTL`, `PUBLIC_URL` (console address used in MCP
+results). See
 [internal/config/config.go](internal/config/config.go).
 
 ## Deploy

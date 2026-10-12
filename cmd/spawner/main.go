@@ -16,12 +16,15 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 	"golang.org/x/sync/errgroup"
@@ -32,16 +35,40 @@ import (
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/backend"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/config"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/events"
+	"github.com/BiodigitalJaz/go-agent-spawner/internal/mcpserver"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/models"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/settings"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/store"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/ui"
 )
 
+// version is set at build time (-ldflags "-X main.version=…"); `go install`
+// builds fall back to the module version.
+var version = "dev"
+
+func buildVersion() string {
+	if version != "dev" {
+		return version
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		return bi.Main.Version
+	}
+	return version
+}
+
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: spawner migrate|api|worker|all")
+		fmt.Fprintln(os.Stderr, "usage: spawner migrate|api|worker|all|mcp")
 		os.Exit(2)
+	}
+	if os.Args[1] == "mcp" {
+		// stdio MCP server: a thin client of a running spawner API. Needs no
+		// database or backend config, and must keep stdout for the protocol.
+		if err := runMCP(); err != nil {
+			fmt.Fprintln(os.Stderr, "spawner mcp:", err)
+			os.Exit(1)
+		}
+		return
 	}
 	if err := run(os.Args[1]); err != nil {
 		slog.Error("fatal", "err", err)
@@ -189,6 +216,18 @@ func run(mode string) error {
 		}
 		apiSrv.Routes(mux)
 		mux.Handle("GET /", ui.Handler())
+		// MCP over Streamable HTTP. Stateless: the API runs several replicas
+		// behind a Service with no session affinity. Tools call back into
+		// this API on loopback with the caller's own bearer token.
+		mcpSrv := mcpserver.New(mcpserver.NewClient(loopbackURL(cfg.HTTPAddr)), mcpserver.Options{
+			ConsoleURL: os.Getenv("PUBLIC_URL"), Version: buildVersion(),
+		})
+		mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpSrv },
+			&mcp.StreamableHTTPOptions{Stateless: true, Logger: log})
+		// One pattern per method: a bare "/mcp" would conflict with "GET /".
+		for _, m := range []string{"GET", "POST", "DELETE"} {
+			mux.Handle(m+" /mcp", mcpHandler)
+		}
 	}
 	// SSE handlers only return when their request context ends, and Shutdown
 	// waits for active connections, so request contexts derive from one that
@@ -334,4 +373,50 @@ func watchPeers(ctx context.Context, bus *events.Bus, pool *backend.Pool) error 
 		}
 	}()
 	return nil
+}
+
+// loopbackURL turns a listen address (":8080", "0.0.0.0:8080") into a URL
+// this process can call itself on.
+func loopbackURL(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port)
+}
+
+// runMCP serves the MCP tools over stdio against a spawner API:
+// SPAWNER_URL (default http://localhost:8080) and a token from SPAWNER_TOKEN,
+// or the file SPAWNER_TOKEN_FILE, or ~/.config/agent-spawner/token.
+func runMCP() error {
+	base := os.Getenv("SPAWNER_URL")
+	if base == "" {
+		base = "http://localhost:8080"
+	}
+	token := strings.TrimSpace(os.Getenv("SPAWNER_TOKEN"))
+	if token == "" {
+		file := os.Getenv("SPAWNER_TOKEN_FILE")
+		if file == "" {
+			if home, err := os.UserHomeDir(); err == nil {
+				file = filepath.Join(home, ".config", "agent-spawner", "token")
+			}
+		}
+		if b, err := os.ReadFile(file); err == nil {
+			token = strings.TrimSpace(string(b))
+		}
+	}
+	auth := ""
+	if token != "" {
+		auth = "Bearer " + token
+	}
+	console := os.Getenv("SPAWNER_CONSOLE_URL")
+	if console == "" {
+		console = base
+	}
+	srv := mcpserver.New(mcpserver.NewClient(base), mcpserver.Options{
+		DefaultAuth: auth, ConsoleURL: console, LocalFiles: true, Version: buildVersion(),
+	})
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return srv.Run(ctx, &mcp.StdioTransport{})
 }

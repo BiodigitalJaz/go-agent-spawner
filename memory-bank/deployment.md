@@ -19,6 +19,9 @@ docker build -t ghcr.io/biodigitaljaz/agent-spawner:<ver> . && docker push ghcr.
 # bump newTag in deploy/kustomize/overlays/andor/kustomization.yaml (and base)
 kubectl apply -k deploy/kustomize/overlays/andor
 ```
+### MCP
+Live image 0.1.10. HTTP: `http://192.168.1.64:30880/mcp` with `Authorization: Bearer <token>`. stdio: `SPAWNER_URL=http://192.168.1.64:30880 spawner mcp` (reads ~/.config/agent-spawner/token).
+
 ### Zero-downtime rollouts
 api and worker have `lifecycle.preStop.sleep.seconds: 5` (the endpoint leaves Service routing before the process stops listening). Verified 331/331 OK during `rollout restart`. When probing right after a deploy, wait for `/readyz` regardless.
 

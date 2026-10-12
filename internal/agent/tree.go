@@ -27,6 +27,15 @@ type TreeRequest struct {
 	// document). Otherwise the whole document goes into one agent's context.
 	Document string
 	Chunks   int
+	// Parts, when set, are given pieces of input (files, records), one agent
+	// each, merged like document chunks. They take precedence over Document.
+	Parts []Part
+}
+
+// Part is one explicitly given piece of input, such as a file.
+type Part struct {
+	Title string `json:"title"`
+	Text  string `json:"text"`
 }
 
 // StartedTree is what StartTree created; Children is set for chunked trees.
@@ -38,7 +47,15 @@ type StartedTree struct {
 // StartTree snapshots the settings, creates the root node and inserts its
 // first job(s), all in one transaction.
 func StartTree(ctx context.Context, db *pgxpool.Pool, client *river.Client[pgx.Tx], req TreeRequest) (*StartedTree, error) {
+	if len(req.Parts) > 0 {
+		return startChunked(ctx, db, client, req)
+	}
 	if req.Document != "" && req.Chunks > 1 {
+		parts := splitDocument(req.Document, req.Chunks)
+		req.Parts = make([]Part, len(parts))
+		for i, p := range parts {
+			req.Parts[i] = Part{Title: fmt.Sprintf("Part %d/%d", i+1, len(parts)), Text: p}
+		}
 		return startChunked(ctx, db, client, req)
 	}
 	if req.Document != "" {
@@ -61,20 +78,31 @@ func documentPrompt(instruction, doc string, part, of int) string {
 		instruction, part, of, part, of, doc)
 }
 
-// startChunked splits the document and fans out one exec agent per part; the
-// root waits for them and its reduce merges the results.
+// partPrompt frames one given part (a file, a record) for its agent.
+func partPrompt(instruction string, p Part, i, n int) string {
+	return fmt.Sprintf("%s\n\nYou are given item %d of %d: %s. Work only from this item; other items are handled by other agents, so do not speculate about them.\n\n--- BEGIN %s ---\n%s\n--- END %s ---",
+		instruction, i, n, p.Title, p.Title, p.Text, p.Title)
+}
+
+// startChunked fans out one exec agent per part (document chunks or given
+// parts); the root waits for them and its reduce merges the results.
 func startChunked(ctx context.Context, db *pgxpool.Pool, client *river.Client[pgx.Tx], req TreeRequest) (*StartedTree, error) {
 	set := req.Settings
 	id := uuid.New()
-	parts := splitDocument(req.Document, req.Chunks)
+	parts := req.Parts
 	root := &store.Node{ID: id, TreeID: id, Prompt: req.Prompt, Model: set.Worker.Model, Role: string(RolePlan), Status: store.StatusQueued}
 	children := make([]*store.Node, len(parts))
 	params := make([]river.InsertManyParams, len(parts))
+	chunked := req.Document != "" // document chunks keep the "part i of n of a larger document" framing
 	for i, part := range parts {
+		prompt := partPrompt(req.Prompt, part, i+1, len(parts))
+		if chunked {
+			prompt = documentPrompt(req.Prompt, part.Text, i+1, len(parts))
+		}
 		c := &store.Node{
 			ID: uuid.New(), TreeID: id, ParentID: &root.ID, Idx: i, Depth: 1,
-			Title:  fmt.Sprintf("Part %d/%d", i+1, len(parts)),
-			Prompt: documentPrompt(req.Prompt, part, i+1, len(parts)),
+			Title:  part.Title,
+			Prompt: prompt,
 			Model:  set.Worker.Model, Role: string(RoleExec), Status: store.StatusQueued,
 		}
 		children[i] = c
