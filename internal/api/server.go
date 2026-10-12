@@ -1,0 +1,691 @@
+// Package api exposes task trees over HTTP: submit, inspect, cancel, live
+// Server-Sent Events backed by the NATS event bus, and the editable agent
+// settings the UI manages.
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/riverqueue/river"
+
+	"github.com/BiodigitalJaz/go-agent-spawner/internal/agent"
+	"github.com/BiodigitalJaz/go-agent-spawner/internal/backend"
+	"github.com/BiodigitalJaz/go-agent-spawner/internal/discovery"
+	"github.com/BiodigitalJaz/go-agent-spawner/internal/events"
+	"github.com/BiodigitalJaz/go-agent-spawner/internal/models"
+	"github.com/BiodigitalJaz/go-agent-spawner/internal/settings"
+	"github.com/BiodigitalJaz/go-agent-spawner/internal/store"
+)
+
+type Server struct {
+	log       *slog.Logger
+	db        *pgxpool.Pool
+	river     *river.Client[pgx.Tx]
+	bus       *events.Bus
+	registry  *models.Registry
+	discovery *discovery.Client
+	defaults  settings.Settings
+	workers   *workerRegistry
+}
+
+func New(log *slog.Logger, db *pgxpool.Pool, client *river.Client[pgx.Tx], bus *events.Bus, registry *models.Registry, defaults settings.Settings) *Server {
+	return &Server{log: log, db: db, river: client, bus: bus, registry: registry, discovery: discovery.New(), defaults: defaults, workers: newWorkerRegistry()}
+}
+
+// Start begins tracking worker heartbeats for the models view.
+func (s *Server) Start(ctx context.Context) error {
+	return s.bus.WatchWorkers(ctx, s.workers.update)
+}
+
+func (s *Server) Routes(mux *http.ServeMux) {
+	mux.HandleFunc("POST /v1/trees", s.createTree)
+	mux.HandleFunc("GET /v1/trees", s.listTrees)
+	mux.HandleFunc("GET /v1/trees/{id}", s.getTree)
+	mux.HandleFunc("DELETE /v1/trees/{id}", s.cancelTree)
+	mux.HandleFunc("GET /v1/trees/{id}/events", s.streamTree)
+	mux.HandleFunc("GET /v1/events", s.streamAll)
+	mux.HandleFunc("GET /v1/settings", s.getSettings)
+	mux.HandleFunc("PUT /v1/settings", s.putSettings)
+	mux.HandleFunc("GET /v1/models", s.getModels)
+	mux.HandleFunc("POST /v1/models", s.createModel)
+	mux.HandleFunc("PUT /v1/models/{name}", s.updateModel)
+	mux.HandleFunc("DELETE /v1/models/{name}", s.deleteModel)
+	mux.HandleFunc("GET /v1/discovery", s.discover)
+	mux.HandleFunc("POST /v1/discovery/load", s.loadModel)
+	mux.HandleFunc("POST /v1/discovery/unload", s.unloadModel)
+}
+
+func (s *Server) knownModel(name string) bool { return s.registry.Has(name) }
+
+type createRequest struct {
+	Prompt   string `json:"prompt"`
+	Priority int    `json:"priority,omitempty"`
+	// Optional per-request overrides of the saved settings.
+	Model       string `json:"model,omitempty"` // worker model
+	MaxDepth    *int   `json:"max_depth,omitempty"`
+	MaxChildren *int   `json:"max_children,omitempty"`
+	// Document mode: the prompt is the instruction, the document is split in
+	// code into Chunks parts (1 or 0 = single context).
+	Document string `json:"document,omitempty"`
+	Chunks   int    `json:"chunks,omitempty"`
+	// Merge overrides how split results are combined: llm, concat or list.
+	Merge string `json:"merge,omitempty"`
+}
+
+func (s *Server) createTree(w http.ResponseWriter, r *http.Request) {
+	var req createRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<20)).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if strings.TrimSpace(req.Prompt) == "" {
+		httpError(w, http.StatusBadRequest, "prompt is required")
+		return
+	}
+	if req.Chunks < 0 || req.Chunks > 64 {
+		httpError(w, http.StatusBadRequest, "chunks must be between 0 and 64")
+		return
+	}
+	stored, err := settings.Load(r.Context(), s.db, s.defaults)
+	if err != nil {
+		s.log.Error("load settings", "err", err)
+		httpError(w, http.StatusInternalServerError, "could not load settings")
+		return
+	}
+	set := stored.Settings
+	if req.Model != "" {
+		set.Worker.Model = req.Model
+	}
+	if req.MaxDepth != nil {
+		set.MaxDepth = *req.MaxDepth
+	}
+	if req.MaxChildren != nil {
+		set.MaxChildren = *req.MaxChildren
+	}
+	if req.Merge != "" {
+		set.Merge = req.Merge
+	}
+	if err := set.Validate(s.knownModel); err != nil {
+		httpError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	if req.Priority == 0 {
+		req.Priority = 1
+	}
+
+	started, err := agent.StartTree(r.Context(), s.db, s.river, agent.TreeRequest{
+		Prompt: req.Prompt, Priority: req.Priority, Settings: set, Document: req.Document, Chunks: req.Chunks,
+	})
+	if err != nil {
+		s.log.Error("start tree", "err", err)
+		httpError(w, http.StatusInternalServerError, "could not start tree")
+		return
+	}
+	root := started.Root
+	if err := s.bus.Publish(r.Context(), events.Event{Type: events.TreeCreated, TreeID: root.TreeID, NodeID: root.ID, Text: truncate(req.Prompt, 200)}); err != nil {
+		s.log.Warn("publish tree.created", "err", err)
+	}
+	if len(started.Children) > 0 {
+		kids := make([]events.Child, len(started.Children))
+		for i, c := range started.Children {
+			kids[i] = events.Child{ID: c.ID, Title: c.Title, Role: c.Role, Prompt: truncate(c.Prompt, 400)}
+		}
+		_ = s.bus.Publish(r.Context(), events.Event{Type: events.NodeSplit, TreeID: root.TreeID, NodeID: root.ID, Role: string(agent.RolePlan),
+			Text: fmt.Sprintf("document split in code into %d parts of about %d characters", len(kids), len(req.Document)/len(kids)), Children: kids})
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"tree_id":    root.TreeID,
+		"events_url": fmt.Sprintf("/v1/trees/%s/events", root.TreeID),
+	})
+}
+
+func (s *Server) listTrees(w http.ResponseWriter, r *http.Request) {
+	limit := 50
+	if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && v > 0 {
+		limit = min(v, 500)
+	}
+	trees, err := store.ListTrees(r.Context(), s.db, limit)
+	if err != nil {
+		s.log.Error("list trees", "err", err)
+		httpError(w, http.StatusInternalServerError, "could not list trees")
+		return
+	}
+	if trees == nil {
+		trees = []store.TreeSummary{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"trees": trees})
+}
+
+func (s *Server) getTree(w http.ResponseWriter, r *http.Request) {
+	id, ok := treeID(w, r)
+	if !ok {
+		return
+	}
+	nodes, err := store.TreeNodes(r.Context(), s.db, id)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if len(nodes) == 0 {
+		httpError(w, http.StatusNotFound, "tree not found")
+		return
+	}
+	set, err := settings.ForTree(r.Context(), s.db, id)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	var root *store.Node
+	for _, n := range nodes {
+		if n.ID == id {
+			root = n
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tree_id":    id,
+		"prompt":     root.Prompt,
+		"status":     root.Status,
+		"created_at": root.CreatedAt,
+		"settings":   set,
+		"nodes":      nodes,
+	})
+}
+
+func (s *Server) cancelTree(w http.ResponseWriter, r *http.Request) {
+	id, ok := treeID(w, r)
+	if !ok {
+		return
+	}
+	n, err := agent.CancelTree(r.Context(), s.db, s.river, s.bus, id)
+	if err != nil {
+		s.log.Error("cancel tree", "tree", id, "err", err)
+		httpError(w, http.StatusInternalServerError, "cancel failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tree_id": id, "cancelled_jobs": n})
+}
+
+func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
+	st, err := settings.Load(r.Context(), s.db, s.defaults)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"version":    st.Version,
+		"settings":   st.Settings,
+		"updated_at": st.UpdatedAt,
+		"defaults":   s.defaults,
+	})
+}
+
+type putSettingsRequest struct {
+	Version  int               `json:"version"`
+	Settings settings.Settings `json:"settings"`
+}
+
+func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
+	var req putSettingsRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if err := req.Settings.Validate(s.knownModel); err != nil {
+		httpError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	st, err := settings.Save(r.Context(), s.db, req.Settings, req.Version)
+	if errors.Is(err, settings.ErrConflict) {
+		httpError(w, http.StatusConflict, err.Error())
+		return
+	}
+	if err != nil {
+		s.log.Error("save settings", "err", err)
+		httpError(w, http.StatusInternalServerError, "could not save settings")
+		return
+	}
+	s.log.Info("settings saved", "version", st.Version)
+	writeJSON(w, http.StatusOK, map[string]any{"version": st.Version, "settings": st.Settings, "updated_at": st.UpdatedAt})
+}
+
+type modelView struct {
+	Name      string         `json:"name"`
+	Model     string         `json:"model"`
+	Endpoints []string       `json:"endpoints"`
+	Initial   int            `json:"initial_limit,omitempty"`
+	Max       int            `json:"max_limit,omitempty"`
+	Extra     map[string]any `json:"extra,omitempty"`
+	Context   int            `json:"context_length,omitempty"`
+	Slots     int            `json:"slots,omitempty"`
+	Shared    bool           `json:"shared_context,omitempty"`
+	Source    string         `json:"source"` // config (backends.json) or ui
+}
+
+// getModels returns the routable models (API keys omitted) plus each live
+// worker's per-endpoint limiter state.
+func (s *Server) getModels(w http.ResponseWriter, _ *http.Request) {
+	list := s.registry.List()
+	out := make([]modelView, len(list))
+	for i, m := range list {
+		out[i] = modelView{Name: m.Name, Model: m.Model, Endpoints: m.Endpoints, Initial: m.InitialLimit, Max: m.MaxLimit, Extra: m.Extra,
+			Context: m.ContextLength, Slots: m.Slots, Shared: m.SharedContext, Source: m.Source}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"models": out, "workers": s.workers.list()})
+}
+
+type modelRequest struct {
+	Name         string         `json:"name"`
+	Model        string         `json:"model"`
+	Endpoints    []string       `json:"endpoints"`
+	InitialLimit int            `json:"initial_limit"`
+	MaxLimit     int            `json:"max_limit"`
+	Extra        map[string]any `json:"extra"`
+	Context      int            `json:"context_length"`
+	Slots        int            `json:"slots"`
+	Shared       bool           `json:"shared_context"`
+}
+
+func (r modelRequest) config() backend.ModelConfig {
+	return backend.ModelConfig{Name: strings.TrimSpace(r.Name), Model: strings.TrimSpace(r.Model), Endpoints: r.Endpoints,
+		InitialLimit: r.InitialLimit, MaxLimit: r.MaxLimit, Extra: r.Extra, ContextLength: r.Context, Slots: r.Slots, SharedContext: r.Shared}
+}
+
+func (s *Server) modelChanged(action, name string) {
+	s.log.Info("model "+action, "model", name)
+	if err := s.bus.PublishModelsChanged(); err != nil {
+		s.log.Warn("publish models changed", "err", err)
+	}
+}
+
+func (s *Server) createModel(w http.ResponseWriter, r *http.Request) {
+	var req modelRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	cfg := req.config()
+	switch err := s.registry.Create(r.Context(), cfg); {
+	case errors.Is(err, models.ErrExists):
+		httpError(w, http.StatusConflict, fmt.Sprintf("a model named %q already exists", cfg.Name))
+		return
+	case err != nil && strings.HasPrefix(err.Error(), "backend:"):
+		httpError(w, http.StatusUnprocessableEntity, strings.TrimPrefix(err.Error(), "backend: "))
+		return
+	case err != nil:
+		s.log.Error("create model", "err", err)
+		httpError(w, http.StatusInternalServerError, "could not create model")
+		return
+	}
+	s.modelChanged("added", cfg.Name)
+	writeJSON(w, http.StatusCreated, cfg)
+}
+
+func (s *Server) updateModel(w http.ResponseWriter, r *http.Request) {
+	var req modelRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	req.Name = r.PathValue("name")
+	cfg := req.config()
+	switch err := s.registry.Update(r.Context(), cfg); {
+	case errors.Is(err, models.ErrReadOnly):
+		httpError(w, http.StatusForbidden, err.Error())
+		return
+	case errors.Is(err, models.ErrNotFound):
+		httpError(w, http.StatusNotFound, err.Error())
+		return
+	case err != nil && strings.HasPrefix(err.Error(), "backend:"):
+		httpError(w, http.StatusUnprocessableEntity, strings.TrimPrefix(err.Error(), "backend: "))
+		return
+	case err != nil:
+		s.log.Error("update model", "err", err)
+		httpError(w, http.StatusInternalServerError, "could not update model")
+		return
+	}
+	s.modelChanged("updated", cfg.Name)
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+// deleteModel refuses while anything could still need the model: a role in
+// the saved settings, an unfinished tree whose snapshot uses it, or queued jobs.
+func (s *Server) deleteModel(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	ctx := r.Context()
+	if st, err := settings.Load(ctx, s.db, s.defaults); err == nil {
+		var roles []string
+		for role, m := range map[string]string{"planner": st.Settings.Planner.Model, "worker": st.Settings.Worker.Model, "reducer": st.Settings.Reducer.Model} {
+			if m == name {
+				roles = append(roles, role)
+			}
+		}
+		if len(roles) > 0 {
+			slices.Sort(roles)
+			httpError(w, http.StatusConflict, fmt.Sprintf("%q is the %s model in Agents & directives; choose another model there first", name, strings.Join(roles, " and ")))
+			return
+		}
+	}
+	var active int
+	if err := s.db.QueryRow(ctx, `SELECT count(*) FROM agent_tree t JOIN agent_node r ON r.id = t.id
+		WHERE r.status NOT IN ('done', 'failed', 'cancelled')
+		AND $1 IN (t.config->'planner'->>'model', t.config->'worker'->>'model', t.config->'reducer'->>'model')`, name).Scan(&active); err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	pending, err := models.PendingJobs(ctx, s.db, agent.QueueName(name))
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if active > 0 || pending > 0 {
+		httpError(w, http.StatusConflict, fmt.Sprintf("%q is still in use by %d running tree(s) and %d queued job(s)", name, active, pending))
+		return
+	}
+	switch err := s.registry.Delete(ctx, name); {
+	case errors.Is(err, models.ErrReadOnly):
+		httpError(w, http.StatusForbidden, err.Error())
+		return
+	case errors.Is(err, models.ErrNotFound):
+		httpError(w, http.StatusNotFound, err.Error())
+		return
+	case err != nil:
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.modelChanged("removed", name)
+	writeJSON(w, http.StatusOK, map[string]string{"removed": name})
+}
+
+// discover lists models on every host the pool uses, plus any ?url= hosts.
+func (s *Server) discover(w http.ResponseWriter, r *http.Request) {
+	seen := map[string]bool{}
+	var hosts []string
+	add := func(raw string) error {
+		base, err := discovery.BaseURL(raw)
+		if err != nil {
+			return err
+		}
+		if !seen[base] {
+			seen[base] = true
+			hosts = append(hosts, base)
+		}
+		return nil
+	}
+	for _, m := range s.registry.List() {
+		for _, ep := range m.Endpoints {
+			_ = add(ep)
+		}
+	}
+	for _, raw := range r.URL.Query()["url"] {
+		if err := add(raw); err != nil {
+			httpError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	out := make([]discovery.Host, len(hosts))
+	var wg sync.WaitGroup
+	for i, h := range hosts {
+		wg.Go(func() { out[i] = s.discovery.Discover(r.Context(), h) })
+	}
+	wg.Wait()
+	writeJSON(w, http.StatusOK, map[string]any{"hosts": out})
+}
+
+type loadRequest struct {
+	URL           string `json:"url"`
+	Model         string `json:"model"`
+	InstanceID    string `json:"instance_id"`
+	ContextLength int    `json:"context_length"`
+}
+
+func (s *Server) loadModel(w http.ResponseWriter, r *http.Request) {
+	var req loadRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil || req.Model == "" {
+		httpError(w, http.StatusBadRequest, "url and model are required")
+		return
+	}
+	base, err := discovery.BaseURL(req.URL)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	defer cancel()
+	s.log.Info("loading model", "host", base, "model", req.Model, "context_length", req.ContextLength)
+	res, err := s.discovery.Load(ctx, base, req.Model, req.ContextLength)
+	if err != nil {
+		httpError(w, http.StatusBadGateway, "load failed: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) unloadModel(w http.ResponseWriter, r *http.Request) {
+	var req loadRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil || req.InstanceID == "" {
+		httpError(w, http.StatusBadRequest, "url and instance_id are required")
+		return
+	}
+	base, err := discovery.BaseURL(req.URL)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.log.Info("unloading model", "host", base, "instance", req.InstanceID)
+	if err := s.discovery.Unload(r.Context(), base, req.InstanceID); err != nil {
+		httpError(w, http.StatusBadGateway, "unload failed: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"unloaded": req.InstanceID})
+}
+
+// streamTree replays the tree's events from the JetStream window and then
+// follows live. Clients reconnect with Last-Event-ID to resume without gaps.
+func (s *Server) streamTree(w http.ResponseWriter, r *http.Request) {
+	id, ok := treeID(w, r)
+	if !ok {
+		return
+	}
+	root, err := store.GetNode(r.Context(), s.db, id)
+	if errors.Is(err, store.ErrNotFound) {
+		httpError(w, http.StatusNotFound, "tree not found")
+		return
+	}
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	var after uint64
+	if v := r.Header.Get("Last-Event-ID"); v != "" {
+		after, _ = strconv.ParseUint(v, 10, 64)
+	}
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	msgs, err := s.bus.Subscribe(ctx, id, after)
+	if err != nil {
+		httpError(w, http.StatusServiceUnavailable, "event stream unavailable")
+		return
+	}
+	sse, ok := startSSE(w)
+	if !ok {
+		return
+	}
+
+	// A tree that finished before its events aged out of the replay window
+	// would otherwise leave the client waiting forever.
+	if root.Status.Terminal() && after == 0 {
+		idle := time.NewTimer(2 * time.Second)
+		defer idle.Stop()
+		select {
+		case m, ok := <-msgs:
+			if ok {
+				sse.event(m)
+				if m.Event.Type.Final() {
+					return
+				}
+			}
+		case <-idle.C:
+			sse.snapshot(root)
+			return
+		}
+	}
+	sse.follow(ctx, msgs, func(m events.Message) bool { return m.Event.Type.Final() })
+}
+
+// streamAll sends lifecycle events for every tree, for the activity view.
+func (s *Server) streamAll(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	msgs, err := s.bus.SubscribeLifecycle(ctx)
+	if err != nil {
+		httpError(w, http.StatusServiceUnavailable, "event stream unavailable")
+		return
+	}
+	sse, ok := startSSE(w)
+	if !ok {
+		return
+	}
+	sse.follow(ctx, msgs, func(events.Message) bool { return false })
+}
+
+type sseWriter struct {
+	w http.ResponseWriter
+	f http.Flusher
+}
+
+func startSSE(w http.ResponseWriter) (*sseWriter, bool) {
+	f, ok := w.(http.Flusher)
+	if !ok {
+		httpError(w, http.StatusInternalServerError, "streaming unsupported")
+		return nil, false
+	}
+	h := w.Header()
+	h.Set("Content-Type", "text/event-stream")
+	h.Set("Cache-Control", "no-cache")
+	h.Set("Connection", "keep-alive")
+	h.Set("X-Accel-Buffering", "no") // disable ingress-nginx buffering
+	w.WriteHeader(http.StatusOK)
+	f.Flush()
+	return &sseWriter{w: w, f: f}, true
+}
+
+func (s *sseWriter) event(m events.Message) {
+	data, _ := json.Marshal(m.Event)
+	fmt.Fprintf(s.w, "id: %d\nevent: %s\ndata: %s\n\n", m.Seq, m.Event.Type, data)
+	s.f.Flush()
+}
+
+func (s *sseWriter) snapshot(root *store.Node) {
+	typ := events.TreeDone
+	text := root.Output
+	switch root.Status {
+	case store.StatusFailed:
+		typ, text = events.TreeFailed, root.Error
+	case store.StatusCancelled:
+		typ = events.TreeCancelled
+	}
+	e := events.Event{Type: typ, TreeID: root.TreeID, NodeID: root.ID, Time: root.UpdatedAt}
+	if text != nil {
+		e.Text = *text
+	}
+	data, _ := json.Marshal(e)
+	fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", typ, data)
+	s.f.Flush()
+}
+
+// follow relays messages until stop returns true, the stream ends, or the
+// client goes away, with keepalives so proxies don't drop idle streams.
+func (s *sseWriter) follow(ctx context.Context, msgs <-chan events.Message, stop func(events.Message) bool) {
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case m, ok := <-msgs:
+			if !ok {
+				return
+			}
+			s.event(m)
+			if stop(m) {
+				return
+			}
+		case <-heartbeat.C:
+			fmt.Fprint(s.w, ": keepalive\n\n")
+			s.f.Flush()
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// workerRegistry keeps the latest heartbeat from each worker replica.
+type workerRegistry struct {
+	mu      sync.Mutex
+	workers map[string]events.WorkerStatus
+}
+
+const workerStale = 6 * time.Second
+
+func newWorkerRegistry() *workerRegistry {
+	return &workerRegistry{workers: map[string]events.WorkerStatus{}}
+}
+
+func (r *workerRegistry) update(ws events.WorkerStatus) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.workers[ws.Worker] = ws
+}
+
+func (r *workerRegistry) list() []events.WorkerStatus {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := []events.WorkerStatus{}
+	for id, ws := range r.workers {
+		if time.Since(ws.Time) > workerStale {
+			delete(r.workers, id)
+			continue
+		}
+		out = append(out, ws)
+	}
+	slices.SortFunc(out, func(a, b events.WorkerStatus) int { return strings.Compare(a.Worker, b.Worker) })
+	return out
+}
+
+func treeID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid tree id")
+		return uuid.Nil, false
+	}
+	return id, true
+}
+
+func truncate(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n]) + "…"
+	}
+	return s
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func httpError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
+}

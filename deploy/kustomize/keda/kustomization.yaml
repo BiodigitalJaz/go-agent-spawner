@@ -1,0 +1,7 @@
+# Optional overlay: scale workers on River queue depth. Requires KEDA.
+#   kubectl apply -k deploy/kustomize/keda
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../base
+  - scaledobject.yaml

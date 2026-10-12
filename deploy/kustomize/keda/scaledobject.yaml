@@ -1,0 +1,34 @@
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: spawner-db
+  namespace: agents
+spec:
+  secretTargetRef:
+    - parameter: connection
+      name: spawner-db
+      key: url
+---
+# Scales worker replicas on jobs waiting for a GPU slot. Note this only adds
+# spawner capacity; if the GPUs themselves are the bottleneck, scale the
+# backend Deployments with a similar trigger filtered to their queue.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: spawner-worker
+  namespace: agents
+spec:
+  scaleTargetRef:
+    name: spawner-worker
+  minReplicaCount: 1
+  maxReplicaCount: 6
+  cooldownPeriod: 300
+  triggers:
+    - type: postgresql
+      authenticationRef:
+        name: spawner-db
+      metadata:
+        query: >-
+          SELECT count(*) FROM river_job
+          WHERE state = 'available' AND queue LIKE 'llm\_%' AND scheduled_at <= now()
+        targetQueryValue: "20"

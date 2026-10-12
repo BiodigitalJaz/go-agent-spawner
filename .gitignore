@@ -1,0 +1,8 @@
+/spawner
+/bin/
+backends.local.json
+# generated experiment output (curated results live in experiments/chunking)
+experiments/stress/results_*.json
+*.log
+__pycache__/
+*.pyc

@@ -1,0 +1,24 @@
+{
+  "planner": "small",
+  "default": "large",
+  "models": [
+    {
+      "name": "small",
+      "model": "qwen/qwen3.5-9b",
+      "endpoints": ["http://192.168.1.50:1234"],
+      "initial_limit": 4,
+      "max_limit": 16,
+      "extra": {"reasoning_effort": "low"}
+    },
+    {
+      "name": "large",
+      "model": "unsloth/qwen3.8-27b",
+      "endpoints": [
+        "http://192.168.1.50:1234",
+        "dns+http://llm-large.agents.svc.cluster.local:8000"
+      ],
+      "initial_limit": 2,
+      "max_limit": 8
+    }
+  ]
+}

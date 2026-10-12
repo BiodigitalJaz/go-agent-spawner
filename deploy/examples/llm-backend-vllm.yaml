@@ -1,0 +1,54 @@
+# Example in-cluster backend. The spawner reaches it through a *headless*
+# Service so it can discover and rate-limit each pod individually:
+#   "endpoints": ["dns+http://llm-large.agents.svc.cluster.local:8000"]
+# Any OpenAI-compatible server works (vLLM, llama.cpp server, LM Studio headless).
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-large
+  namespace: agents
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: llm-large
+  ports:
+    - {name: http, port: 8000}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-large
+  namespace: agents
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: llm-large
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: llm-large
+    spec:
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest # pin a version you have tested
+          args: ["--model", "Qwen/Qwen3-32B-AWQ", "--port", "8000", "--max-num-seqs", "16"]
+          ports:
+            - {name: http, containerPort: 8000}
+          # Ready only once the model is loaded, so DNS discovery skips
+          # loading pods.
+          startupProbe:
+            httpGet: {path: /v1/models, port: http}
+            periodSeconds: 10
+            failureThreshold: 90
+          readinessProbe:
+            httpGet: {path: /v1/models, port: http}
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - {name: models, mountPath: /root/.cache/huggingface}
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: llm-model-cache

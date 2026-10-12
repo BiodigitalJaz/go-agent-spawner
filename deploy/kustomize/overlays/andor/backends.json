@@ -1,0 +1,13 @@
+{
+  "planner": "qwen27b",
+  "default": "qwen27b",
+  "models": [
+    {
+      "name": "qwen27b",
+      "model": "unsloth/qwen3.8-27b",
+      "endpoints": ["http://192.168.1.76:1234"],
+      "initial_limit": 2,
+      "max_limit": 4
+    }
+  ]
+}

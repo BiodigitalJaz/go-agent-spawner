@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Spawner</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='7' r='4' fill='%236366f1'/%3E%3Ccircle cx='7' cy='24' r='4' fill='%230ea5e9'/%3E%3Ccircle cx='25' cy='24' r='4' fill='%2314b8a6'/%3E%3Cpath d='M16 11v4M16 15l-8 6M16 15l8 6' stroke='%2394a3b8' stroke-width='2' fill='none'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" width="22" height="22" aria-hidden="true"><circle cx="16" cy="7" r="4" fill="var(--c-plan)"/><circle cx="7" cy="24" r="4" fill="var(--c-exec)"/><circle cx="25" cy="24" r="4" fill="var(--c-reduce)"/><path d="M16 11v4M16 15l-8 6M16 15l8 6" stroke="var(--muted)" stroke-width="2" fill="none"/></svg>
+      <span>Agent Spawner</span>
+    </div>
+    <nav class="tabs" aria-label="Sections">
+      <a href="#/runs" data-tab="runs">Runs</a>
+      <a href="#/settings" data-tab="settings">Agents<span class="long">&nbsp;&amp; directives</span></a>
+      <a href="#/models" data-tab="models">Models<span class="long">&nbsp;&amp; capacity</span></a>
+    </nav>
+    <div class="vitals" aria-live="polite">
+      <span class="vital" title="Agents generating right now"><span class="dot dot-running"></span><b id="v-agents">0</b> agents</span>
+      <span class="vital" title="Trees in progress"><b id="v-trees">0</b> active</span>
+      <span class="vital" title="Worker replicas reporting"><b id="v-workers">0</b> workers</span>
+      <span class="vital conn" id="v-conn" title="Live event stream">offline</span>
+      <button class="icon-btn" id="theme-toggle" title="Toggle theme" aria-label="Toggle theme">◐</button>
+    </div>
+  </header>
+  <main id="app"></main>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

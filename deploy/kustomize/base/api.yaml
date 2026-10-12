@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spawner-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: spawner-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: spawner-api
+    spec:
+      # Migrations take an advisory lock, so concurrent pods are safe.
+      initContainers:
+        - name: migrate
+          image: agent-spawner
+          args: ["migrate"]
+          envFrom:
+            - configMapRef:
+                name: spawner-env
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: spawner-db, key: url}
+          volumeMounts:
+            - {name: backends, mountPath: /etc/spawner}
+      containers:
+        - name: api
+          image: agent-spawner
+          args: ["api"]
+          # Keep serving while the endpoint is removed from Service routing, so
+          # rollouts don't refuse connections (native sleep: the image is
+          # distroless and has no shell).
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 5
+          ports:
+            - {name: http, containerPort: 8080}
+          envFrom:
+            - configMapRef:
+                name: spawner-env
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: spawner-db, key: url}
+          volumeMounts:
+            - {name: backends, mountPath: /etc/spawner}
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+          resources:
+            requests: {cpu: 100m, memory: 64Mi}
+            limits: {memory: 256Mi}
+      volumes:
+        - name: backends
+          configMap:
+            name: spawner-backends
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spawner-api
+spec:
+  selector:
+    app.kubernetes.io/name: spawner-api
+  ports:
+    - {name: http, port: 80, targetPort: http}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: spawner-api
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: spawner-api

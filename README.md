@@ -1,0 +1,153 @@
+# go-agent-spawner
+
+A pool of AI agents on goroutines that splits work dynamically, backed by
+[River](https://github.com/riverqueue/river) (Postgres job queue) for
+durability and distribution, and NATS JetStream for live token streaming.
+Inference backends are any OpenAI-compatible server: LM Studio, vLLM or
+llama.cpp.
+
+## How it works
+
+```
+POST /v1/trees ──► root node + plan job (one tx)
+                          │
+            River queue llm_<model> (Postgres, priority 1-4)
+                          │  fetched by any worker replica
+                          ▼
+   Worker.Work ── Acquire GPU slot (per-endpoint AIMD limiter)
+      │              └─ saturated? JobSnooze → another replica picks it up
+      ├─ plan:   planner model returns JSON {direct | split[subtasks]}
+      │            split → children + their jobs + JobCompleteTx (one tx)
+      │            direct → exec inline (same model) or hand off
+      ├─ exec:   stream answer ─► NATS (delta/thinking events)
+      │            finish node; last sibling enqueues parent reduce (one tx)
+      └─ reduce: synthesize children's outputs ─► finish node ─► … ─► tree.done
+
+GET /v1/trees/{id}/events ◄── SSE from NATS (replay + Last-Event-ID resume)
+```
+
+- **Control plane: River.** Task lifecycle, retries, priorities, distribution
+  across replicas, and atomic split/join. Every state change commits in the
+  same transaction as job completion, so a crash never orphans children or
+  loses a reduce.
+- **Data plane: goroutines and the backend pool.** Each backend endpoint has an
+  adaptive concurrency limit (AIMD on time-to-first-token). The limiter finds
+  how many parallel requests a GPU can take before requests start queueing
+  inside the server. Independent replicas converge on a fair share without
+  coordinating.
+- **Feedback: NATS JetStream.** Token deltas are batched at 50 ms (the first
+  one is sent immediately) and never touch Postgres. A short replay window lets
+  SSE clients reconnect without gaps.
+
+## Web console
+
+The API serves a web console at `/`. It's embedded in the binary and needs no build step or CDN, so it works in air-gapped clusters.
+
+- **Runs:** submit prompts, with per-run overrides for the worker model, split depth, fan-out and priority. Watch every run live:
+  - a timeline of each agent's phases (queued, planning, thinking, working, waiting on children, merging) with a "parallel agents" chart underneath
+  - a card for each spawned agent, with streaming output, collapsible reasoning, TTFT, tok/s, tokens and endpoint
+  - the merged result
+  - a sidebar that updates live, with per-status progress bars for every run
+- **Agents & directives:** choose the model, temperature and max tokens for each role (planner, worker, reducer), edit each role's directive (system prompt), and set split depth and fan-out. Settings are versioned, so concurrent edits are detected. Each run snapshots the settings when it starts, so edits never change a run in progress.
+- **Models & capacity:** every model in the pool, with each worker's live limiter state per endpoint (slots in use, learned limit, baseline TTFT, ejected). Below that, **Discover** lists every model your backends offer. You can load or unload models on LM Studio hosts and **add any of them to the pool** with a routing name, concurrency limits and a reasoning setting ("off" sends `reasoning_effort: "none"`). Workers start serving new models within seconds, with no restart. Models from `backends.json` are read-only; console-added ones can be edited or removed.
+
+The console has no authentication. Expose it only on a trusted network, or behind an authenticating proxy.
+
+### Merge strategies
+
+| Mode | How | Use for |
+|---|---|---|
+| `llm` (default) | The reducer model synthesizes one answer | Prose, anything that needs reconciliation across parts |
+| `list` | Code: every distinct line once (ignoring case and spacing), in part order | Extraction and other list-shaped answers |
+| `concat` | Code: each part's output verbatim, in order | Independent sections; code (never drops a line) |
+
+Set a default in *Agents & directives*, or per run in the run form or with `merge` on `POST /v1/trees`. See [experiments/chunking/RESULTS.md](experiments/chunking/RESULTS.md) for measured trade-offs.
+
+### Merge size guard
+
+Before a reducer merges its children, it estimates the input size from each child's recorded completion tokens (or characters ÷ 3) against the reducer model's `context_length`. Inputs that don't fit are first **consolidated in parallel batches** (a lossless condensation step), repeating up to 4 passes, then merged. A single result too large on its own is truncated with a visible `[… N characters omitted …]` marker instead of being silently cut by the server. The reducer's stats report `merge_batches`, `merge_passes` and `truncated`, and the console shows them on the merge card.
+
+## Run locally
+
+```sh
+cp backends.example.json backends.local.json   # point at your LM Studio
+make deps                                       # postgres, nats, river UI on :8081
+DATABASE_URL=postgres://postgres:dev@localhost:5432/spawner?sslmode=disable \
+BACKENDS_FILE=backends.local.json go run ./cmd/spawner migrate
+DATABASE_URL=postgres://postgres:dev@localhost:5432/spawner?sslmode=disable \
+BACKENDS_FILE=backends.local.json go run ./cmd/spawner all
+
+curl -s -X POST localhost:8080/v1/trees -d '{"prompt":"..."}'
+curl -N localhost:8080/v1/trees/<tree_id>/events
+curl -s localhost:8080/debug/backends     # live limiter state per endpoint
+```
+
+In LM Studio, enable **Serve on Local Network** for access from the cluster,
+and raise the max concurrent predictions setting. The limiter only finds
+parallelism the server allows.
+
+## API
+
+| Method | Path | |
+|---|---|---|
+| POST | `/v1/trees` | `{"prompt", "priority"? (1-4), "model"?, "max_depth"?, "max_children"?, "document"?, "chunks"?}` → `{tree_id, events_url}`. The optional fields override the saved settings for this run only. **Document mode:** `prompt` is the instruction and `document` is split *in code* into `chunks` parts (paragraph boundaries), each handled by its own agent and merged by the reducer, with no planner. `chunks` ≤ 1 puts the whole document into one agent's context. **`merge`** overrides how split results are combined: `llm` (default; the reducer model writes the answer), `list` (in code: union of lines, duplicates dropped; for list-shaped answers) or `concat` (in code: outputs joined verbatim). Code merges take no GPU slot and add no model latency; failed parts appear as `[part N failed: …]` |
+| GET | `/v1/trees?limit=` | Recent trees with node counts by status |
+| GET | `/v1/trees/{id}` | Tree prompt, settings snapshot, and every node with outputs, timeline timestamps and stats |
+| GET | `/v1/trees/{id}/events` | SSE stream: `node.started`, `thinking`, `delta`, `node.split`, `node.done`, `node.failed`, `tree.done`/`tree.failed`/`tree.cancelled` |
+| DELETE | `/v1/trees/{id}` | Cancel the tree; running generations stop |
+| GET | `/v1/events` | SSE lifecycle events for every tree (no tokens), including `tree.created` |
+| GET/PUT | `/v1/settings` | Role models, temperature, max tokens, directives, depth and fan-out. PUT takes `{"version", "settings"}`; returns 409 if the version is stale and 422 if validation fails |
+| GET | `/v1/models` | Routable models (backends.json and console-added, with `source`; API keys omitted) and live worker heartbeats |
+| POST / PUT / DELETE | `/v1/models[/{name}]` | Add, edit or remove console-managed models. Workers pick changes up within seconds. Delete is refused while the model is in use (by settings, a running tree, or queued jobs) |
+| GET | `/v1/discovery[?url=]` | Models offered by each backend host (LM Studio: size, quantization, load state, parallel slots, reasoning options) |
+| POST | `/v1/discovery/load`, `/v1/discovery/unload` | LM Studio only: `{url, model, context_length?}` / `{url, instance_id}` |
+
+## Configuration
+
+What the agents do (role models, directives, temperature, depth, fan-out) is configured in the console or through `/v1/settings`. Settings are stored in Postgres; until someone saves, defaults come from `planner`/`default` and `MAX_DEPTH`/`MAX_CHILDREN`.
+
+`backends.json` defines the models the pool can use:
+
+| Field | Meaning |
+|---|---|
+| `planner` / `default` | Default planner and worker models, used until settings are saved |
+| `models[].name` | Routing key; River queue is `llm_<name>` |
+| `models[].model` | Model id sent to the API |
+| `models[].endpoints` | `http://host:port` (static) or `dns+http://headless-svc:port` (one endpoint per ready pod, re-resolved every `DISCOVERY_INTERVAL`) |
+| `models[].initial_limit` / `max_limit` | AIMD bounds per endpoint |
+| `models[].extra` | Merged into each request body, e.g. `{"reasoning_effort":"none"}` (LM Studio: turns reasoning off) |
+| `models[].context_length` | Context the server loaded the model with. Merges are sized to fit it; 0 = unknown (assume 8k) |
+| `models[].shared_context` | The context is **one pool shared by all concurrent requests** (LM Studio, llama.cpp unified KV), not a per-request limit. Workers estimate each request's tokens (prompt chars ÷ 4 + reserved output) and admit requests only while the total across all workers fits 90% of `context_length`. An estimate over budget waits for an idle pool (the server makes the final call). If the pool still overflows, the server's transient "Context size has been exceeded" is retried shortly without using up an attempt |
+| `models[].slots` | Server parallel slots shared by **all** worker replicas; workers exchange in-flight counts every 500 ms and never exceed it. With slots set, the limiter stops treating rising TTFT as congestion (it's batching load within known capacity) and only backs off on errors. 0 = no shared cap (latency-based AIMD) |
+
+The values are expanded with `${ENV}`, so API keys can come from Secrets.
+
+Environment: `DATABASE_URL` (required), `NATS_URL`, `HTTP_ADDR`, `MAX_DEPTH`
+(split nesting, 0 disables planning), `MAX_CHILDREN`, `MAX_WORKERS_PER_QUEUE`,
+`ACQUIRE_WAIT`, `SNOOZE`, `JOB_TIMEOUT`, `WORKER_QUEUES` (serve a subset of
+models), `RIVER_POLL_ONLY` (needed behind PgBouncer transaction pooling),
+`RIVER_FETCH_COOLDOWN`, `RIVER_FETCH_POLL_INTERVAL`, `EVENT_RETENTION`,
+`EVENT_REPLICAS`, `SHUTDOWN_TIMEOUT`. See
+[internal/config/config.go](internal/config/config.go).
+
+## Deploy
+
+```sh
+kubectl -n agents create secret generic spawner-db --from-literal=url='postgres://...'
+kubectl apply -k deploy/kustomize/base      # or deploy/kustomize/keda with KEDA installed
+```
+
+- `spawner-api` runs migrations in an init container, serves the API and SSE,
+  and only inserts jobs.
+- `spawner-worker` runs the River workers. On SIGTERM it stops fetching and
+  lets in-flight generations finish. Anything still running after
+  `SHUTDOWN_TIMEOUT` is returned to the queue without using up a retry.
+- [deploy/examples](deploy/examples) has an in-cluster vLLM backend behind a
+  headless Service, and ingress-nginx settings for SSE.
+
+## Tests
+
+```sh
+make test               # unit tests
+make test-integration   # end-to-end against real Postgres and NATS (docker compose)
+```

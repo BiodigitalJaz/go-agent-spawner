@@ -1,0 +1,36 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: agents
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: agent-spawner
+resources:
+  - namespace.yaml
+  - nats.yaml
+  - api.yaml
+  - worker.yaml
+  - riverui.yaml
+configMapGenerator:
+  - name: spawner-backends
+    files:
+      - backends.json
+  - name: spawner-env
+    literals:
+      - NATS_URL=nats://nats:4222
+      - BACKENDS_FILE=/etc/spawner/backends.json
+      - MAX_DEPTH=2
+      - MAX_CHILDREN=6
+      - MAX_WORKERS_PER_QUEUE=32
+      - JOB_TIMEOUT=10m
+      - SHUTDOWN_TIMEOUT=10m
+      - EVENT_RETENTION=15m
+      # Set to true if DATABASE_URL goes through PgBouncer in transaction mode
+      # (LISTEN/NOTIFY needs a session connection).
+      - RIVER_POLL_ONLY=false
+images:
+  - name: agent-spawner
+    newName: ghcr.io/biodigitaljaz/agent-spawner
+    newTag: 0.1.8
+# DATABASE_URL comes from a Secret you create for your existing Postgres:
+#   kubectl -n agents create secret generic spawner-db \
+#     --from-literal=url='postgres://spawner:...@postgres-rw.db.svc:5432/spawner'

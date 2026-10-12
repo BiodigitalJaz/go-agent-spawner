@@ -1,0 +1,22 @@
+# ingress-nginx settings so SSE token streams aren't buffered or cut off.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: spawner-api
+  namespace: agents
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: agents.example.internal
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: spawner-api
+                port: {name: http}
