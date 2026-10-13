@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -44,6 +45,8 @@ type fakeLLM struct {
 	sharedChars int64
 	inflight    atomic.Int64
 	pressure    atomic.Int64
+	mu          sync.Mutex
+	prompts     []string // every user message received
 }
 
 func (f *fakeLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -56,6 +59,9 @@ func (f *fakeLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = json.Unmarshal(body, &req)
 	user := req.Messages[len(req.Messages)-1].Content
 	system := req.Messages[0].Content
+	f.mu.Lock()
+	f.prompts = append(f.prompts, user)
+	f.mu.Unlock()
 	if f.sharedChars > 0 {
 		size := int64(len(user) + len(system))
 		defer f.inflight.Add(-size)
@@ -627,6 +633,42 @@ func TestGivenPartsOneAgentEach(t *testing.T) {
 				t.Fatalf("part %d's prompt leaks part %d", n.Idx, j)
 			}
 		}
+	}
+}
+
+func TestPartMaxWordsCapsPartsNotTheMerge(t *testing.T) {
+	llm := &fakeLLM{}
+	h := setup(t, llm)
+	parts := []agent.Part{{Title: "a.md", Text: "svc-001"}, {Title: "b.md", Text: "svc-002"}, {Title: "c.md", Text: "svc-003"}}
+	started, err := agent.StartTree(context.Background(), h.db, h.client, agent.TreeRequest{
+		Prompt: "Summarize.", Priority: 1, Settings: h.set, Parts: parts, PartMaxWords: 50, // default llm merge
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last := h.collect(t, started.Root.TreeID); last[len(last)-1].Type != events.TreeDone {
+		t.Fatalf("tree failed: %+v", last[len(last)-1])
+	}
+	llm.mu.Lock()
+	defer llm.mu.Unlock()
+	// The fake echoes prompts as answers, so the merge request quotes the
+	// parts' prompts; its own task section must be the plain prompt.
+	capped, merges := 0, 0
+	for _, p := range llm.prompts {
+		if task, ok := strings.CutPrefix(p, "Original task:\n"); ok {
+			merges++
+			if task, _, _ = strings.Cut(task, "Results from"); strings.Contains(task, "words") {
+				t.Fatalf("the merge task must not be capped: %q", task)
+			}
+			continue
+		}
+		if !strings.HasSuffix(p, "Keep your answer under 50 words. It will be combined with the answers for the other parts, so give only what matters most.") {
+			t.Fatalf("each part's prompt should end with the cap:\n%s", p)
+		}
+		capped++
+	}
+	if capped != 3 || merges != 1 {
+		t.Fatalf("want 3 capped parts and 1 merge, got %d and %d", capped, merges)
 	}
 }
 
