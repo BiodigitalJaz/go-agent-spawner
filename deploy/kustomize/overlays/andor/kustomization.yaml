@@ -12,7 +12,7 @@ resources:
   - ../../base
 images:
   - name: ghcr.io/biodigitaljaz/agent-spawner
-    newTag: 0.1.13
+    newTag: 0.1.16
 configMapGenerator:
   - name: spawner-backends
     behavior: replace

@@ -233,6 +233,8 @@ label.field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; 
   content: ""; position: absolute; left: -20px; top: 22px; width: 18px; border-top: 2px solid var(--border);
 }
 .card { padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; min-width: 0; transition: border-color .2s; }
+/* Off-screen cards skip layout and paint; big runs have dozens of them. */
+.card { content-visibility: auto; contain-intrinsic-size: auto 180px; }
 .card.active { border-color: color-mix(in srgb, var(--c-exec) 55%, var(--border)); }
 .card.flash { animation: flash 1.2s ease-out; }
 @keyframes flash { from { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 45%, transparent); } }

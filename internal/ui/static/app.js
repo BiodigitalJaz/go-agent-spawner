@@ -84,6 +84,27 @@ function setPill(el, status, live) {
   if (el.className !== cls) el.className = cls;
   setText(el, status);
 }
+// once runs fn only when key differs from the last key stored under name in
+// memo. Live views repaint every 150 ms; skipping unchanged writes keeps the
+// browser from re-laying out the page (which made typing lag during runs).
+function once(memo, name, key, fn) { if (memo[name] !== key) { memo[name] = key; fn(); } }
+// patchChildren updates parent's children in place from specs
+// ({tag, cls, style, title, text}), reusing elements instead of rebuilding.
+function patchChildren(parent, specs) {
+  while (parent.children.length > specs.length) parent.lastElementChild.remove();
+  specs.forEach((sp, i) => {
+    let el = parent.children[i];
+    if (!el || el.tagName !== sp.tag.toUpperCase()) {
+      const fresh = document.createElement(sp.tag);
+      if (el) el.replaceWith(fresh); else parent.append(fresh);
+      el = fresh;
+    }
+    if (el.className !== sp.cls) el.className = sp.cls;
+    if (el.getAttribute("style") !== sp.style) el.setAttribute("style", sp.style);
+    if ((sp.title ?? "") !== el.title) el.title = sp.title ?? "";
+    if (sp.text !== undefined && el.textContent !== sp.text) el.textContent = sp.text;
+  });
+}
 // Reorders children to match `want` without touching ones already in place,
 // since moving an element would also cancel a click in progress.
 function syncOrder(parent, want) {
@@ -595,18 +616,20 @@ function treeView(root, id) {
 
     const want = list.map((n) => {
       const r = tlRow(n.id);
-      // Tracks hold no controls, so rebuilding their segments is safe.
-      r.track.replaceChildren(...segments(n, now).map((s) =>
-        h("div", { class: `seg ${s.cls}${!s.b || (live && s.b === now) ? " live" : ""}`, style: `left:${pct(s.a)};width:${wpct(s.a, s.b)}`, title: `${s.title}: ${fmtDur(s.b - s.a)}` })));
+      const specs = segments(n, now).map((s) => ({ tag: "div", cls: `seg ${s.cls}${!s.b || (live && s.b === now) ? " live" : ""}`,
+        style: `left:${pct(s.a)};width:${wpct(s.a, s.b)}`, title: `${s.title}: ${fmtDur(s.b - s.a)}` }));
       if (n.finished && TERMINAL.has(n.status)) {
-        r.track.append(h("span", { class: `cap ${n.status}`, style: `left:${pct(n.finished)}` }, n.status === "done" ? "✓" : n.status === "failed" ? "✕" : "–"));
+        specs.push({ tag: "span", cls: `cap ${n.status}`, style: `left:${pct(n.finished)}`, text: n.status === "done" ? "✓" : n.status === "failed" ? "✕" : "–" });
       }
+      patchChildren(r.track, specs);
       const role = n.id === id ? (n.split ? "plan" : n.role || "plan") : n.role || "exec";
-      r.role.className = `role role-${role}`;
+      if (r.role.className !== `role role-${role}`) r.role.className = `role role-${role}`;
       setText(r.role, role === "exec" ? "work" : role);
       setText(r.title, n.id === id ? "Root task" : n.title || "…");
-      r.label.title = n.title || "Root task";
-      r.label.style.paddingLeft = `${n.depth * 14}px`;
+      once(r, "labelKey", `${n.title}|${n.depth}`, () => {
+        r.label.title = n.title || "Root task";
+        r.label.style.paddingLeft = `${n.depth * 14}px`;
+      });
       return r.row;
     });
     if (live) {
@@ -617,8 +640,8 @@ function treeView(root, id) {
 
     const step = niceStep(span);
     const ticks = [];
-    for (let x = 0; x <= span; x += step) ticks.push(h("span", { class: "tick", style: `left:${(100 * x) / span}%` }, x === 0 ? "0" : fmtDur(x)));
-    tlAxis.replaceChildren(...ticks);
+    for (let x = 0; x <= span; x += step) ticks.push({ tag: "span", cls: "tick", style: `left:${(100 * x) / span}%`, text: x === 0 ? "0" : fmtDur(x) });
+    patchChildren(tlAxis, ticks);
 
     renderConcurrency(list, t0, span, now);
   }
@@ -655,7 +678,7 @@ function treeView(root, id) {
       title: h("span", { class: "title" }),
       status: h("span"),
       meta: h("div", { class: "card-meta" }),
-      task: h("div", { class: "task", title: "Click to expand", onclick: (e) => e.currentTarget.classList.toggle("open") }),
+      task: h("div", { class: "task", title: "Click to expand" }),
       reason: h("div", { class: "reason" }),
       thinkSum: h("span", { class: "lbl" }),
       thinkText: h("div", { class: "think-text" }),
@@ -670,13 +693,37 @@ function treeView(root, id) {
       refs.meta, refs.task, refs.reason, refs.think, refs.out, refs.err, refs.foot);
     const kids = h("div", { class: "children" });
     const wrap = h("div", { class: "node-wrap" }, card, kids);
-    c = { wrap, card, kids, refs, lastText: -1, lastThink: -1 };
+    c = { wrap, card, kids, refs, lastText: -1, lastThink: -1, memo: {}, stickOut: true, stickThink: true, prompt: "" };
+    // A part's prompt can hold a whole file. Keep only a preview in the page
+    // until it is opened: laying out every card's full input made the page
+    // slow to respond (typing in the composer lagged during big runs).
+    refs.task.addEventListener("click", () => {
+      const open = refs.task.classList.toggle("open");
+      refs.task.textContent = open ? c.prompt : taskPreview(c.prompt);
+    });
+    // Track "following the bottom" from scroll events instead of measuring on
+    // every update: measuring forces a layout per streaming card per frame.
+    refs.out.addEventListener("scroll", () => { c.stickOut = refs.out.scrollHeight - refs.out.scrollTop - refs.out.clientHeight < 30; }, { passive: true });
+    refs.thinkText.addEventListener("scroll", () => { c.stickThink = refs.thinkText.scrollHeight - refs.thinkText.scrollTop - refs.thinkText.clientHeight < 30; }, { passive: true });
     cards.set(n.id, c);
     return c;
   }
 
+  // streamInto appends only the new part of a growing text (streams only
+  // grow), rewriting the node when the text was replaced.
+  function streamInto(el, text, last) {
+    if (last >= 0 && last <= text.length && el.firstChild?.nodeType === Node.TEXT_NODE && el.childNodes.length === 1 && el.firstChild.length === last) {
+      el.firstChild.appendData(text.slice(last));
+    } else {
+      el.textContent = text;
+    }
+  }
+
+  function taskPreview(p) { return p.length > 600 ? p.slice(0, 600) + "…" : p; }
+
   function renderCards() {
     const now = Date.now();
+    const follow = []; // scrolled after all writes: one layout, not one per card
     for (const n of ordered()) {
       const c = cardFor(n);
       const parentKids = n.parent && cards.has(n.parent) ? cards.get(n.parent).kids : graph;
@@ -687,20 +734,26 @@ function treeView(root, id) {
         parentKids.insertBefore(c.wrap, sib || null);
       }
       const r = c.refs;
+      const m = c.memo;
       const isRoot = n.id === id;
       const role = n.phase || (n.split ? "plan" : n.role || "exec");
-      r.role.className = `role role-${role}`;
-      r.role.textContent = role === "exec" ? "work" : role === "reduce" ? "merge" : role;
-      r.title.textContent = isRoot ? "Root task" : n.title || "…";
+      once(m, "role", role, () => {
+        r.role.className = `role role-${role}`;
+        r.role.textContent = role === "exec" ? "work" : role === "reduce" ? "merge" : role;
+      });
+      setText(r.title, isRoot ? "Root task" : n.title || "…");
       const liveNode = !TERMINAL.has(n.status) && n.status !== "queued" && n.status !== "waiting";
       const shown = n.status === "running" && !n.text && n.think ? "thinking" : n.status;
-      r.status.replaceChildren(pill(shown, liveNode));
-      c.card.classList.toggle("active", liveNode);
+      once(m, "status", `${shown}|${liveNode}`, () => {
+        r.status.replaceChildren(pill(shown, liveNode));
+        c.card.classList.toggle("active", liveNode);
+      });
 
       const st = n.stats;
       const startedFor = n.phase === "reduce" ? n.reduceStarted : n.started;
       const codeMerge = st?.model?.startsWith("merge:");
-      r.meta.replaceChildren(...[
+      const running = !st && liveNode && startedFor ? fmtDur(now - startedFor) : "";
+      once(m, "meta", `${n.model}|${running}|${st ? JSON.stringify(st) : ""}`, () => r.meta.replaceChildren(...[
         codeMerge ? h("span", { title: "Combined in code, no model call" }, "merged in code (", h("b", {}, st.model.slice(6)), ")")
           : n.model && h("span", {}, "model ", h("b", {}, st?.model || n.model)),
         st && !codeMerge ? h("span", {}, "TTFT ", h("b", {}, fmtDur(st.ttft_ms))) : null,
@@ -711,34 +764,41 @@ function treeView(root, id) {
         st?.merge_batches ? h("span", { title: "Results exceeded the merge context, so they were consolidated in parallel batches first" },
           "merged via ", h("b", {}, st.merge_batches), ` batches / ${st.merge_passes} pass${st.merge_passes === 1 ? "" : "es"}`) : null,
         st?.truncated ? h("span", { class: "warn-text", title: "Inputs that alone exceeded the merge context were cut (marked in the text)" }, `⚠ ${st.truncated} truncated`) : null,
-      ].filter(Boolean));
+      ].filter(Boolean)));
 
+      // Compare against the last value written, never read textContent
+      // back: prompts can be tens of thousands of characters per card.
       const prompt = isRoot ? "" : n.prompt;
-      if (r.task.textContent !== prompt) r.task.textContent = prompt;
-      r.task.style.display = prompt ? "" : "none";
-      if (r.reason.textContent !== n.reason) r.reason.textContent = n.reason ? `Split: ${n.reason}` : "";
+      once(m, "prompt", prompt, () => {
+        c.prompt = prompt;
+        r.task.textContent = r.task.classList.contains("open") ? prompt : taskPreview(prompt);
+        r.task.style.display = prompt ? "" : "none";
+      });
+      once(m, "reason", n.reason, () => { r.reason.textContent = n.reason ? `Split: ${n.reason}` : ""; });
 
       if (n.think.length !== c.lastThink) {
+        once(m, "thinkShown", !!n.think, () => { r.think.style.display = n.think ? "" : "none"; });
+        streamInto(r.thinkText, n.think, c.lastThink);
         c.lastThink = n.think.length;
-        r.think.style.display = n.think ? "" : "none";
-        r.thinkText.textContent = n.think;
-        r.thinkText.scrollTop = r.thinkText.scrollHeight;
+        if (c.stickThink) follow.push(r.thinkText);
       }
       const thinkingNow = liveNode && n.think && !(n.phase === "reduce" ? n.reduceFirstDelta : n.firstDelta);
-      r.think.classList.toggle("live", !!thinkingNow);
-      r.thinkSum.textContent = thinkingNow ? `thinking · ${n.think.length.toLocaleString()} chars` : `reasoning · ${n.think.length.toLocaleString()} chars`;
+      once(m, "thinkSum", `${!!thinkingNow}|${n.think.length}`, () => {
+        r.think.classList.toggle("live", !!thinkingNow);
+        r.thinkSum.textContent = `${thinkingNow ? "thinking" : "reasoning"} · ${n.think.length.toLocaleString()} chars`;
+      });
 
       // Root output duplicates the Result panel once done; show it only while streaming.
       const text = isRoot && n.status === "done" ? "" : n.text;
       if (text.length !== c.lastText) {
-        const stick = r.out.scrollHeight - r.out.scrollTop - r.out.clientHeight < 30;
+        streamInto(r.out, text, c.lastText);
         c.lastText = text.length;
-        r.out.textContent = text;
-        if (stick) r.out.scrollTop = r.out.scrollHeight;
+        if (c.stickOut) follow.push(r.out);
       }
-      r.err.textContent = n.error;
-      r.foot.style.display = text.length > 400 ? "" : "none";
+      once(m, "err", n.error, () => { r.err.textContent = n.error; });
+      once(m, "foot", text.length > 400, () => { r.foot.style.display = text.length > 400 ? "" : "none"; });
     }
+    for (const el of follow) el.scrollTop = 1e9; // clamped to the bottom
   }
 
   function focusCard(nid) {
