@@ -6,7 +6,12 @@ _Last updated: 2026-10-12_
 **Deployed and live** on the user's cluster: namespace `agent-spawner`, console at http://192.168.1.64:30880 (NodePort 30880 on any node). See deployment.md for every detail. Next steps depend on the user.
 
 ## Recent changes
-### 2026-10-12: MCP server (0.1.10, branch `feat/mcp-server`, PR)
+### 2026-10-12: large-part splitting + largest-first (0.1.12, branch `feat/split-large-parts`)
+- Given parts over `max_part_tokens` (default **16000**; -1 off) are split at line boundaries into sections (text kept byte-exact, `splitText`), titled "<file> (section i/n)". Jobs are inserted largest first (River runs equal-priority jobs in insertion order); node idx keeps file order for the merge. >400 expanded parts → 400. analyze_files default max file size 120 KB → 400 KB.
+- **Measured on the user's 29-file docs run (172k input tokens, qwen3.5-9b, 8 slots, 32k shared ctx), same inputs rebuilt from the stored prompts:** baseline 219 s; split at 6k: **343 s** (46 agents, output 15k→26k tokens, extra merge pass 88 s); split at 16k: 238 s; largest-first only: 203 s and 248 s (run-to-run noise ±20%); 16k + "at most 120 words": **113 s** (output 4.8k tokens).
+- **Lesson: per-part summary work is output-bound** (each agent writes ~550 tokens regardless of input size; aggregate decode ~80–105 tok/s on the GPU). More parts = more total generation. Splitting is for context safety, not speed. Speed lever = shorter per-part outputs. My predicted 1.5–2 min from splitting at 6k was wrong.
+- Open idea: a separate per-part instruction / output cap so the final merge isn't also shortened (the 120-word prompt shrank the final answer to 801 chars).
+### 2026-10-12: MCP server (0.1.10, merged to main via PR #1)
 - `internal/mcpserver` (official Go SDK v1.8.0): tools run_task, analyze_files (stdio only), get_task, cancel_task, list_models. Progress notifications per finished agent; auto chunk sizing (`AutoChunks`: ≤6k tokens → 1, ≤30k → 4, else ceil(t/7500) up to 16).
 - `spawner mcp` = stdio server, a thin client of the API (`SPAWNER_URL`, token from `SPAWNER_TOKEN` / `SPAWNER_TOKEN_FILE` / `~/.config/agent-spawner/token`). Needs no DB.
 - `/mcp` on the API: stateless Streamable HTTP (2 replicas, no affinity), protected by auth middleware; tools call the API on loopback with the caller's own Authorization header. Registered per method because a bare `/mcp` conflicts with `GET /` in the Go mux (panicked at startup; caught by the e2e run).
