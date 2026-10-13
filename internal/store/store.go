@@ -230,19 +230,25 @@ func CancelTree(ctx context.Context, db DBTX, treeID uuid.UUID) (int64, error) {
 }
 
 // TreeSummary is one row of the tree list, with node counts by status.
+// ListPromptChars caps the prompt in tree listings. A prompt can carry a
+// whole document; a list only needs a preview (full prompts made the
+// listing megabytes and slowed the console). GET /v1/trees/{id} has it all.
+const ListPromptChars = 400
+
 type TreeSummary struct {
-	ID         uuid.UUID        `json:"id"`
-	Prompt     string           `json:"prompt"`
-	Status     Status           `json:"status"`
-	CreatedAt  time.Time        `json:"created_at"`
-	FinishedAt *time.Time       `json:"finished_at,omitempty"`
-	Counts     map[Status]int64 `json:"counts"`
-	Total      int64            `json:"total"`
+	ID          uuid.UUID        `json:"id"`
+	Prompt      string           `json:"prompt"`       // first ListPromptChars characters
+	PromptChars int              `json:"prompt_chars"` // full length
+	Status      Status           `json:"status"`
+	CreatedAt   time.Time        `json:"created_at"`
+	FinishedAt  *time.Time       `json:"finished_at,omitempty"`
+	Counts      map[Status]int64 `json:"counts"`
+	Total       int64            `json:"total"`
 }
 
 func ListTrees(ctx context.Context, db DBTX, limit int) ([]TreeSummary, error) {
 	rows, err := db.Query(ctx, `
-		SELECT t.id, t.prompt, t.created_at, r.status, r.finished_at,
+		SELECT t.id, left(t.prompt, $2), length(t.prompt), t.created_at, r.status, r.finished_at,
 			count(n.id),
 			count(n.id) FILTER (WHERE n.status = 'queued'),
 			count(n.id) FILTER (WHERE n.status = 'running'),
@@ -256,7 +262,7 @@ func ListTrees(ctx context.Context, db DBTX, limit int) ([]TreeSummary, error) {
 		JOIN agent_node n ON n.tree_id = t.id
 		GROUP BY t.id, r.status, r.finished_at
 		ORDER BY t.created_at DESC
-		LIMIT $1`, limit)
+		LIMIT $1`, limit, ListPromptChars)
 	if err != nil {
 		return nil, err
 	}
@@ -265,7 +271,7 @@ func ListTrees(ctx context.Context, db DBTX, limit int) ([]TreeSummary, error) {
 	for rows.Next() {
 		var t TreeSummary
 		var c [7]int64
-		if err := rows.Scan(&t.ID, &t.Prompt, &t.CreatedAt, &t.Status, &t.FinishedAt, &t.Total,
+		if err := rows.Scan(&t.ID, &t.Prompt, &t.PromptChars, &t.CreatedAt, &t.Status, &t.FinishedAt, &t.Total,
 			&c[0], &c[1], &c[2], &c[3], &c[4], &c[5], &c[6]); err != nil {
 			return nil, err
 		}

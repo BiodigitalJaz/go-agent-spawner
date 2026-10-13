@@ -238,7 +238,9 @@ function runsView(root, initialId) {
       const it = listItem(t.id);
       const live = !TERMINAL.has(t.status);
       it.a.classList.toggle("selected", t.id === selected);
-      setText(it.prompt, t.prompt);
+      // The server sends a preview; cut here too so an old server's full
+      // prompts never fill the sidebar the composer shares.
+      once(it, "promptKey", t.prompt, () => { it.prompt.textContent = t.prompt.length > 400 ? t.prompt.slice(0, 400) + "…" : t.prompt; });
       setPill(it.pill, t.status, live);
       setText(it.count, `${t.total} agent${t.total === 1 ? "" : "s"}`);
       const created = ms(t.created_at);
@@ -507,7 +509,13 @@ function treeView(root, id) {
         graph));
   }
 
-  const headPrompt = h("div", { class: "prompt" });
+  const headMemo = {};
+  const headPrompt = h("div", { class: "prompt", title: "Click to show all" });
+  // Document runs carry the whole document in the prompt: show a preview
+  // until clicked, so a huge text never sits in the page uninvited.
+  let headOpen = false;
+  const headText = () => (headOpen || t.prompt.length <= 2000 ? t.prompt : `${t.prompt.slice(0, 2000)}… (${t.prompt.length.toLocaleString()} characters, click to show all)`);
+  headPrompt.addEventListener("click", () => { if (t.prompt.length > 2000) { headOpen = !headOpen; headPrompt.textContent = headText(); } });
   const headPill = h("span");
   const headElapsed = h("span", { class: "elapsed" });
   const cancelBtn = h("button", { class: "btn small danger", onclick: cancelTree }, "Cancel run");
@@ -516,7 +524,7 @@ function treeView(root, id) {
   function renderHead() {
     const live = !TERMINAL.has(t.status);
     const end = live ? Date.now() : Math.max(...[...nodes.values()].map((n) => n.finished || 0), t.created || 0);
-    setText(headPrompt, t.prompt);
+    once(headMemo, "prompt", t.prompt, () => { headPrompt.textContent = headText(); });
     setPill(headPill, t.status, live);
     setText(headElapsed, fmtDur(end - t.created));
     cancelBtn.hidden = !live;
