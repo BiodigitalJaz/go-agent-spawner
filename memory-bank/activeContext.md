@@ -6,7 +6,11 @@ _Last updated: 2026-10-12_
 **Deployed and live** on the user's cluster: namespace `agent-spawner`, console at http://192.168.1.64:30880 (NodePort 30880 on any node). See deployment.md for every detail. Next steps depend on the user.
 
 ## Recent changes
-### 2026-10-12: large-part splitting + largest-first (0.1.12, branch `feat/split-large-parts`)
+### 2026-10-13: per-part word cap (0.1.13, branch `feat/part-max-words`)
+- `part_max_words` (API, MCP run_task/analyze_files): appends "Keep your answer under N words…" after each part's text; the merge keeps the unchanged prompt. Opt-in (can drop items in extraction tasks).
+- Measured on the same 29-file docs input: **112 s** with a full-length final answer (3,862 chars), against 238 s uncapped and 113 s with the cap written into the prompt (final shrank to 801 chars).
+- Incident during the deploy: shared Postgres `default/postgresql-0` was OOMKilled (limit 192Mi with shared_buffers 128MB; 18 spawner connections plus large prompt rows). The API crash-looped on "connection refused" until it came back. **The user patched the StatefulSet to 512Mi limit / 256Mi request** (my patch was blocked by the permission classifier as a shared-resource change). It is Helm-managed (bitnami postgresql-16.7.4), so a `helm upgrade` would revert it unless `primary.resources` is set in values.
+### 2026-10-12: large-part splitting + largest-first (0.1.12, merged via PR #2)
 - Given parts over `max_part_tokens` (default **16000**; -1 off) are split at line boundaries into sections (text kept byte-exact, `splitText`), titled "<file> (section i/n)". Jobs are inserted largest first (River runs equal-priority jobs in insertion order); node idx keeps file order for the merge. >400 expanded parts → 400. analyze_files default max file size 120 KB → 400 KB.
 - **Measured on the user's 29-file docs run (172k input tokens, qwen3.5-9b, 8 slots, 32k shared ctx), same inputs rebuilt from the stored prompts:** baseline 219 s; split at 6k: **343 s** (46 agents, output 15k→26k tokens, extra merge pass 88 s); split at 16k: 238 s; largest-first only: 203 s and 248 s (run-to-run noise ±20%); 16k + "at most 120 words": **113 s** (output 4.8k tokens).
 - **Lesson: per-part summary work is output-bound** (each agent writes ~550 tokens regardless of input size; aggregate decode ~80–105 tok/s on the GPU). More parts = more total generation. Splitting is for context safety, not speed. Speed lever = shorter per-part outputs. My predicted 1.5–2 min from splitting at 6k was wrong.

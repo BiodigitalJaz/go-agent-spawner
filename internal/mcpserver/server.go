@@ -107,6 +107,7 @@ type RunInput struct {
 	Document       string `json:"document,omitempty" jsonschema:"a long input to split into chunks handled in parallel"`
 	Parts          []Part `json:"parts,omitempty" jsonschema:"inputs given one agent each, such as files; titles name them in the result"`
 	Chunks         int    `json:"chunks,omitempty" jsonschema:"number of chunks for document; 0 picks automatically (1 up to about 6k tokens, else 4 or more)"`
+	PartMaxWords   int    `json:"part_max_words,omitempty" jsonschema:"ask each part's agent for an answer under this many words; the final merge keeps full length. For summaries with merge llm, 100-150 roughly halves the time. Avoid for extraction (lists of every X), where it can drop items"`
 	MaxPartTokens  int    `json:"max_part_tokens,omitempty" jsonschema:"parts larger than this many tokens are split into sections, one agent each (default 16000; -1 keeps parts whole)"`
 	Merge          string `json:"merge,omitempty" jsonschema:"how results are combined: list (distinct lines, for extraction), concat (verbatim, per-item outputs) or llm (synthesized answer); default is the server setting" enum:"list,concat,llm"`
 	Model          string `json:"model,omitempty" jsonschema:"worker model name (see list_models); default is the server setting"`
@@ -123,6 +124,7 @@ type FilesInput struct {
 	Merge          string   `json:"merge,omitempty" jsonschema:"concat (default: each file's output verbatim), list (distinct lines) or llm (one synthesized answer)" enum:"concat,list,llm"`
 	MaxFiles       int      `json:"max_files,omitempty" jsonschema:"at most this many files (default and maximum 64)"`
 	MaxFileBytes   int      `json:"max_file_bytes,omitempty" jsonschema:"skip files larger than this (default 400000 bytes)"`
+	PartMaxWords   int      `json:"part_max_words,omitempty" jsonschema:"ask each part's agent for an answer under this many words; the final merge keeps full length. For summaries with merge llm, 100-150 roughly halves the time. Avoid for extraction (lists of every X), where it can drop items"`
 	MaxPartTokens  int      `json:"max_part_tokens,omitempty" jsonschema:"files larger than this many tokens are split into sections, one agent each (default 16000; -1 keeps files whole)"`
 	Model          string   `json:"model,omitempty" jsonschema:"worker model name; default is the server setting"`
 	Wait           *bool    `json:"wait,omitempty" jsonschema:"wait for the result (default true)"`
@@ -168,7 +170,7 @@ func (s *server) runTask(ctx context.Context, req *mcp.CallToolRequest, in RunIn
 	if strings.TrimSpace(in.Prompt) == "" {
 		return nil, RunOutput{}, errors.New("prompt is required")
 	}
-	body := CreateTree{Prompt: in.Prompt, Priority: in.Priority, Model: in.Model, MaxDepth: in.MaxDepth, Merge: in.Merge, Parts: in.Parts, MaxPartTokens: in.MaxPartTokens}
+	body := CreateTree{Prompt: in.Prompt, Priority: in.Priority, Model: in.Model, MaxDepth: in.MaxDepth, Merge: in.Merge, Parts: in.Parts, MaxPartTokens: in.MaxPartTokens, PartMaxWords: in.PartMaxWords}
 	chunks := 0
 	if len(in.Parts) == 0 && in.Document != "" {
 		chunks = in.Chunks
@@ -199,7 +201,7 @@ func (s *server) analyzeFiles(ctx context.Context, req *mcp.CallToolRequest, in 
 	if merge == "" {
 		merge = "concat"
 	}
-	body := CreateTree{Prompt: in.Instruction, Model: in.Model, Merge: merge, Parts: got.Parts, MaxPartTokens: in.MaxPartTokens}
+	body := CreateTree{Prompt: in.Instruction, Model: in.Model, Merge: merge, Parts: got.Parts, MaxPartTokens: in.MaxPartTokens, PartMaxWords: in.PartMaxWords}
 	return s.start(ctx, req, body, len(got.Parts), got.Skipped, in.Wait, in.TimeoutSeconds)
 }
 

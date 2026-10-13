@@ -91,6 +91,7 @@ type CreateTree struct {
 	Parts       []Part `json:"parts,omitempty"`
 	// MaxPartTokens splits larger parts into sections (0 = server default).
 	MaxPartTokens int `json:"max_part_tokens,omitempty"`
+	PartMaxWords  int `json:"part_max_words,omitempty"`
 }
 
 func (c *Client) CreateTree(ctx context.Context, auth string, req CreateTree) (string, error) {

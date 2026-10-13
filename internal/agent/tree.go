@@ -33,6 +33,11 @@ type TreeRequest struct {
 	// MaxPartTokens splits given parts larger than this into sections, one
 	// agent each. 0 means DefaultMaxPartTokens; negative disables splitting.
 	MaxPartTokens int
+	// PartMaxWords, when > 0, asks each part's agent for an answer under
+	// that many words. The merge still gets the unchanged prompt, so the
+	// final answer keeps its length. Per-part work is output-bound, so short
+	// part answers are the main speed lever for summaries.
+	PartMaxWords int
 }
 
 // Part is one explicitly given piece of input, such as a file.
@@ -106,6 +111,10 @@ func startChunked(ctx context.Context, db *pgxpool.Pool, client *river.Client[pg
 		prompt := partPrompt(req.Prompt, part, i+1, len(parts))
 		if chunked {
 			prompt = documentPrompt(req.Prompt, part.Text, i+1, len(parts))
+		}
+		if req.PartMaxWords > 0 {
+			// After the input, so a long part does not bury it.
+			prompt += fmt.Sprintf("\n\nKeep your answer under %d words. It will be combined with the answers for the other parts, so give only what matters most.", req.PartMaxWords)
 		}
 		c := &store.Node{
 			ID: uuid.New(), TreeID: id, ParentID: &root.ID, Idx: i, Depth: 1,

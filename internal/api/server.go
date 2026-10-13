@@ -88,6 +88,9 @@ type createRequest struct {
 	// MaxPartTokens splits parts larger than this into sections (default
 	// 6000; -1 keeps every part whole).
 	MaxPartTokens int `json:"max_part_tokens,omitempty"`
+	// PartMaxWords asks each part's agent for a short answer; the merge
+	// keeps the full prompt.
+	PartMaxWords int `json:"part_max_words,omitempty"`
 }
 
 func (s *Server) createTree(w http.ResponseWriter, r *http.Request) {
@@ -102,6 +105,10 @@ func (s *Server) createTree(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Chunks < 0 || req.Chunks > 64 {
 		httpError(w, http.StatusBadRequest, "chunks must be between 0 and 64")
+		return
+	}
+	if req.PartMaxWords < 0 || req.PartMaxWords > 5000 {
+		httpError(w, http.StatusBadRequest, "part_max_words must be between 0 and 5000")
 		return
 	}
 	if len(req.Parts) > 64 {
@@ -143,7 +150,7 @@ func (s *Server) createTree(w http.ResponseWriter, r *http.Request) {
 
 	started, err := agent.StartTree(r.Context(), s.db, s.river, agent.TreeRequest{
 		Prompt: req.Prompt, Priority: req.Priority, Settings: set, Document: req.Document, Chunks: req.Chunks, Parts: req.Parts,
-		MaxPartTokens: req.MaxPartTokens,
+		MaxPartTokens: req.MaxPartTokens, PartMaxWords: req.PartMaxWords,
 	})
 	if errors.Is(err, agent.ErrTooManyParts) {
 		httpError(w, http.StatusBadRequest, err.Error())
