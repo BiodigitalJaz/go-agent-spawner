@@ -47,7 +47,7 @@ func TestSplitTextKeepsTextExactly(t *testing.T) {
 
 func TestExpandParts(t *testing.T) {
 	small := Part{Title: "a.md", Text: "short"}
-	big := Part{Title: "big.md", Text: strings.Repeat("line of text here\n", 9000)} // ~40.5k tokens
+	big := Part{Title: "big.md", Text: strings.Repeat("line of text here\n", 7000)} // 126k chars: 42k tokens at chars/3
 	out, err := expandParts([]Part{small, big}, 0)
 	if err != nil {
 		t.Fatal(err)

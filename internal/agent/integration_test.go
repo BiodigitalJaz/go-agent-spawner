@@ -45,8 +45,12 @@ type fakeLLM struct {
 	sharedChars int64
 	inflight    atomic.Int64
 	pressure    atomic.Int64
-	mu          sync.Mutex
-	prompts     []string // every user message received
+	// charsPerToken, when set, reports usage.prompt_tokens as prompt
+	// characters / charsPerToken (dense text tokenizes below the 4 the
+	// estimate assumes).
+	charsPerToken float64
+	mu            sync.Mutex
+	prompts       []string // every user message received
 }
 
 func (f *fakeLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -109,6 +113,12 @@ func (f *fakeLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		}
+	}
+	if f.charsPerToken > 0 {
+		usage, _ := json.Marshal(map[string]any{"choices": []any{}, "usage": map[string]int{
+			"prompt_tokens": int(float64(len(user)+len(system)) / f.charsPerToken), "completion_tokens": len(strings.Fields(content)),
+		}})
+		fmt.Fprintf(w, "data: %s\n\n", usage)
 	}
 	fmt.Fprint(w, "data: [DONE]\n\n")
 }
@@ -837,6 +847,65 @@ func TestCodeMergeSkipsModel(t *testing.T) {
 				t.Fatalf("expected 1 failed part and most services kept: failed=%d kept=%d", failedParts, kept)
 			}
 		})
+	}
+}
+
+// Dense text tokenizes below the chars/4 estimate, so admission lets in more
+// than the shared context holds. The overflow must be retried inside the job
+// (no attempt used), and the real prompt sizes must calibrate admission so
+// the overflows stop.
+func TestDenseTextCalibratesAdmission(t *testing.T) {
+	llm := &fakeLLM{sharedChars: 3500, charsPerToken: 2, wordDelay: 10 * time.Millisecond} // one part at a time really fits
+	h := setup(t, llm)
+	if err := h.pool.SetModels([]backend.ModelConfig{
+		{Name: "small", Model: "fake-small", Endpoints: []string{h.llmURL}, InitialLimit: 2, MaxLimit: 4},
+		// ~1.7k estimated tokens per part: the budget (3,600) admits two.
+		{Name: "large", Model: "fake-large", Endpoints: []string{h.llmURL}, InitialLimit: 4, MaxLimit: 4, ContextLength: 4000, SharedContext: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	set := h.set
+	set.Merge = settings.MergeList
+	started, err := agent.StartTree(context.Background(), h.db, h.client, agent.TreeRequest{
+		Prompt: "List every service and port.", Priority: 1, Settings: set, Document: testDocument(60), Chunks: 6,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evs := h.collect(t, started.Root.TreeID)
+	if last := evs[len(evs)-1]; last.Type != events.TreeDone || strings.Contains(last.Text, "failed:") {
+		t.Fatalf("all parts must succeed: %+v", last)
+	}
+	// Until the first response reports its real size, only overflows raise
+	// the ratio, and requests already admitted keep their low reservations:
+	// a few overflows are expected, at most about one per part.
+	if p := llm.pressure.Load(); p == 0 || p > 6 {
+		t.Fatalf("expected a few overflows before calibration took over, got %d", p)
+	}
+	if r := h.pool.TokenRatio("large"); r < 1.5 {
+		t.Fatalf("token ratio should have learned the dense text, got %.2f", r)
+	}
+	var burned int
+	if err := h.db.QueryRow(context.Background(),
+		`SELECT count(*) FROM river_job WHERE args->>'tree_id' = $1 AND attempt > 1`, started.Root.TreeID.String()).Scan(&burned); err != nil {
+		t.Fatal(err)
+	}
+	if burned != 0 {
+		t.Fatalf("overflows must not use up attempts; %d jobs retried", burned)
+	}
+	// Viewers were told to drop the abandoned attempts' partial text.
+	restarts := 0
+	seen := map[string]bool{}
+	for _, e := range evs {
+		if e.Type == events.NodeStarted && e.Role == "exec" {
+			if seen[e.NodeID.String()] {
+				restarts++
+			}
+			seen[e.NodeID.String()] = true
+		}
+	}
+	if restarts == 0 {
+		t.Fatal("a retried part should announce its restart")
 	}
 }
 

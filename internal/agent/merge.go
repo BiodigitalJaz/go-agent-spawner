@@ -186,12 +186,18 @@ func codeMerge(mode string, children []*store.Node) (out string, failed int) {
 // It errs high for prose and low for dense code; the shared-context budget
 // keeps a margin, and a transient overflow is retried.
 func estimateRequest(msgs []llm.Message, maxTokens int) int {
-	n := 0
+	prompt, output := estimateParts(msgs, maxTokens)
+	return prompt + output
+}
+
+// estimateParts is estimateRequest split into prompt and reserved output, so
+// the pool can calibrate the prompt part against real token counts.
+func estimateParts(msgs []llm.Message, maxTokens int) (prompt, output int) {
 	for _, m := range msgs {
-		n += len(m.Content)/4 + 8
+		prompt += len(m.Content)/4 + 8
 	}
 	if maxTokens <= 0 {
 		maxTokens = 1024
 	}
-	return n + maxTokens
+	return prompt, maxTokens
 }

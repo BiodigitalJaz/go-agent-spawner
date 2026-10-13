@@ -182,6 +182,50 @@ func TestSharedSlotsCapAcrossWorkers(t *testing.T) {
 	l.Done(llm.Stats{}, nil)
 }
 
+func TestTokenRatioCalibratesAdmission(t *testing.T) {
+	p, err := NewPool(slog.New(slog.NewTextHandler(io.Discard, nil)), []ModelConfig{{
+		Name: "m", Model: "api-m", InitialLimit: 8, MaxLimit: 8, Slots: 8,
+		ContextLength: 32000, SharedContext: true, // budget 28,800
+		Endpoints: []string{"http://10.0.0.1:1234"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	// Uncalibrated: two 10k-prompt requests (plus 1k output each) fit.
+	a, _ := p.AcquireRequest(ctx, "m", 0, 10000, 1000)
+	b, err := p.AcquireRequest(ctx, "m", 0, 10000, 1000)
+	if err != nil {
+		t.Fatal("two should fit before calibration:", err)
+	}
+	b.Done(llm.Stats{}, nil)
+	// The server reports the prompt was really 17k tokens.
+	a.Done(llm.Stats{PromptTokens: 17000, TTFT: time.Millisecond}, nil)
+	if r := p.TokenRatio("m"); r < 1.69 || r > 1.71 {
+		t.Fatalf("ratio = %.2f, want 1.7", r)
+	}
+	a, _ = p.AcquireRequest(ctx, "m", 0, 10000, 1000) // reserves 18k
+	if _, err := p.AcquireRequest(ctx, "m", 20*time.Millisecond, 10000, 1000); !errors.Is(err, ErrSaturated) {
+		t.Fatalf("a second calibrated request must wait, got %v", err)
+	}
+	a.Done(llm.Stats{}, &llm.StatusError{Code: 500, Body: "Context size has been exceeded."})
+	if r := p.TokenRatio("m"); r < 1.75 {
+		t.Fatalf("an overflow should raise the ratio, got %.2f", r)
+	}
+	// One dense outlier among typical text must not pin the ratio high.
+	for i := range 40 {
+		actual := 1200 // typical: 1.2
+		if i == 20 {
+			actual = 2200 // one outlier: 2.2
+		}
+		l, _ := p.AcquireRequest(ctx, "m", 0, 1000, 0)
+		l.Done(llm.Stats{PromptTokens: actual, TTFT: time.Millisecond}, nil)
+	}
+	if r := p.TokenRatio("m"); r < 1.2 || r > 1.45 {
+		t.Fatalf("ratio should settle near the typical 1.2 plus a margin, got %.3f", r)
+	}
+}
+
 func TestSharedContextBudget(t *testing.T) {
 	p, err := NewPool(slog.New(slog.NewTextHandler(io.Discard, nil)), []ModelConfig{{
 		Name: "m", Model: "api-m", InitialLimit: 8, MaxLimit: 8, Slots: 8,
