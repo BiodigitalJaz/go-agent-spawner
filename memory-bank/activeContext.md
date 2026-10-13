@@ -6,7 +6,11 @@ _Last updated: 2026-10-12_
 **Deployed and live** on the user's cluster: namespace `agent-spawner`, console at http://192.168.1.64:30880 (NodePort 30880 on any node). See deployment.md for every detail. Next steps depend on the user.
 
 ## Recent changes
-### 2026-10-13: console typing lag during live runs (0.1.16, branch `fix/console-typing-lag`)
+### 2026-10-13: composer typing lag with no jobs running (0.1.17, branch `fix/list-prompt-preview`)
+- Cause: `GET /v1/trees?limit=100` returned every run's full prompt (document runs carry the whole document: max 364k chars; 3.1 MB total). The console refetched it every 10 s and kept ~3.1M characters in the sidebar beside the composer, so every keystroke cost ~23 ms.
+- Fix: listing sends `left(prompt, 400)` plus `prompt_chars` (`store.ListPromptChars`); the sidebar also cuts to 400; the run header shows a 2,000-char preview with click-to-expand.
+- Measured on the cluster (Playwright, ~25 s of steady typing, idle page): median 23 ms → 6 ms per key; listing 3.1 MB → 48 KB.
+### 2026-10-13: console typing lag during live runs (0.1.16, merged via PR #4)
 - Cause: the live run view repainted every 150 ms and rewrote every card (pill, meta, title, error), read each card's full prompt back via textContent (~60k chars × 32 cards), rebuilt timeline segments, and measured scroll per streaming card (forced layout each). Keystrokes in the composer waited behind it.
 - Fix: `once()` memo per card (write only on change), `patchChildren()` for timeline/axis, `streamInto()` appends deltas, scroll-follow tracked by scroll events and applied after all writes, task prompt shows a 600-char preview until clicked, `.card { content-visibility: auto }`.
 - Measured (Playwright, live 32-agent run on the cluster): keystroke 40 ms → 16–24 ms; locally renderCards 412 ms → ~0 per 5 s, layout 376 → 18 ms.
