@@ -30,6 +30,9 @@ type TreeRequest struct {
 	// Parts, when set, are given pieces of input (files, records), one agent
 	// each, merged like document chunks. They take precedence over Document.
 	Parts []Part
+	// MaxPartTokens splits given parts larger than this into sections, one
+	// agent each. 0 means DefaultMaxPartTokens; negative disables splitting.
+	MaxPartTokens int
 }
 
 // Part is one explicitly given piece of input, such as a file.
@@ -48,6 +51,11 @@ type StartedTree struct {
 // first job(s), all in one transaction.
 func StartTree(ctx context.Context, db *pgxpool.Pool, client *river.Client[pgx.Tx], req TreeRequest) (*StartedTree, error) {
 	if len(req.Parts) > 0 {
+		parts, err := expandParts(req.Parts, req.MaxPartTokens)
+		if err != nil {
+			return nil, err
+		}
+		req.Parts = parts
 		return startChunked(ctx, db, client, req)
 	}
 	if req.Document != "" && req.Chunks > 1 {
@@ -92,7 +100,7 @@ func startChunked(ctx context.Context, db *pgxpool.Pool, client *river.Client[pg
 	parts := req.Parts
 	root := &store.Node{ID: id, TreeID: id, Prompt: req.Prompt, Model: set.Worker.Model, Role: string(RolePlan), Status: store.StatusQueued}
 	children := make([]*store.Node, len(parts))
-	params := make([]river.InsertManyParams, len(parts))
+	params := make([]river.InsertManyParams, 0, len(parts))
 	chunked := req.Document != "" // document chunks keep the "part i of n of a larger document" framing
 	for i, part := range parts {
 		prompt := partPrompt(req.Prompt, part, i+1, len(parts))
@@ -106,7 +114,11 @@ func startChunked(ctx context.Context, db *pgxpool.Pool, client *river.Client[pg
 			Model:  set.Worker.Model, Role: string(RoleExec), Status: store.StatusQueued,
 		}
 		children[i] = c
-		params[i] = river.InsertManyParams{Args: TaskArgs{TreeID: id, NodeID: c.ID, Role: RoleExec, Model: set.Worker.Model, Priority: req.Priority}}
+	}
+	// Jobs of equal priority run in insertion order, so insert the largest
+	// parts first. Node indexes keep the given order for the merge.
+	for _, i := range largestFirst(parts) {
+		params = append(params, river.InsertManyParams{Args: TaskArgs{TreeID: id, NodeID: children[i].ID, Role: RoleExec, Model: set.Worker.Model, Priority: req.Priority}})
 	}
 	err := pgx.BeginFunc(ctx, db, func(tx pgx.Tx) error {
 		if err := settings.SnapshotTree(ctx, tx, id, req.Prompt, set); err != nil {

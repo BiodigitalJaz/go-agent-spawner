@@ -85,6 +85,9 @@ type createRequest struct {
 	Merge string `json:"merge,omitempty"`
 	// Parts are given pieces of input, one agent each (e.g. files).
 	Parts []agent.Part `json:"parts,omitempty"`
+	// MaxPartTokens splits parts larger than this into sections (default
+	// 6000; -1 keeps every part whole).
+	MaxPartTokens int `json:"max_part_tokens,omitempty"`
 }
 
 func (s *Server) createTree(w http.ResponseWriter, r *http.Request) {
@@ -140,7 +143,12 @@ func (s *Server) createTree(w http.ResponseWriter, r *http.Request) {
 
 	started, err := agent.StartTree(r.Context(), s.db, s.river, agent.TreeRequest{
 		Prompt: req.Prompt, Priority: req.Priority, Settings: set, Document: req.Document, Chunks: req.Chunks, Parts: req.Parts,
+		MaxPartTokens: req.MaxPartTokens,
 	})
+	if errors.Is(err, agent.ErrTooManyParts) {
+		httpError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if err != nil {
 		s.log.Error("start tree", "err", err)
 		httpError(w, http.StatusInternalServerError, "could not start tree")
@@ -687,7 +695,10 @@ func treeID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
 
 func splitReason(req createRequest, n int) string {
 	if len(req.Parts) > 0 {
-		return fmt.Sprintf("%d given parts, one agent each", n)
+		if n > len(req.Parts) {
+			return fmt.Sprintf("%d given parts as %d agents (large parts split into sections), largest first", len(req.Parts), n)
+		}
+		return fmt.Sprintf("%d given parts, one agent each, largest first", n)
 	}
 	return fmt.Sprintf("document split in code into %d parts of about %d characters", n, len(req.Document)/n)
 }

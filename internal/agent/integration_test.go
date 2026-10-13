@@ -630,6 +630,72 @@ func TestGivenPartsOneAgentEach(t *testing.T) {
 	}
 }
 
+func TestLargePartsSplitIntoSectionsLargestFirst(t *testing.T) {
+	h := setup(t, &fakeLLM{})
+	set := h.set
+	set.Merge = settings.MergeConcat
+	big := strings.Repeat("Service svc-100 runs on port 8100.\n", 40) // ~1.4k chars
+	parts := []agent.Part{
+		{Title: "small.md", Text: "svc-001 on port 7001"},
+		{Title: "big.md", Text: big},
+		{Title: "medium.md", Text: strings.Repeat("svc-050 on port 7050. ", 12)},
+	}
+	started, err := agent.StartTree(context.Background(), h.db, h.client, agent.TreeRequest{
+		Prompt: "List services.", Priority: 1, Settings: set, Parts: parts, MaxPartTokens: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, c := range started.Children {
+		got = append(got, c.Title)
+	}
+	if len(got) != 6 || got[0] != "small.md" || got[1] != "big.md (section 1/4)" || got[4] != "big.md (section 4/4)" || got[5] != "medium.md" {
+		t.Fatalf("children (in merge order) = %v", got)
+	}
+	// Jobs were inserted largest first (big.md's last section is a short
+	// remainder, so it may follow medium.md); small.md goes last.
+	rows, err := h.db.Query(context.Background(),
+		`SELECT args->>'node_id' FROM river_job WHERE args->>'tree_id' = $1 ORDER BY id`, started.Root.TreeID.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	title := map[string]string{}
+	for _, c := range started.Children {
+		title[c.ID.String()] = c.Title
+	}
+	var order []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		if tl, ok := title[id]; ok {
+			order = append(order, tl)
+		}
+	}
+	rows.Close()
+	if len(order) != 6 || order[0] != "big.md (section 1/4)" || order[5] != "small.md" {
+		t.Fatalf("job order = %v", order)
+	}
+	evs := h.collect(t, started.Root.TreeID)
+	last := evs[len(evs)-1]
+	if last.Type != events.TreeDone {
+		t.Fatalf("tree failed: %+v", last)
+	}
+	nodes, _ := store.TreeNodes(context.Background(), h.db, started.Root.TreeID)
+	var joined strings.Builder
+	for _, n := range nodes {
+		if n.ParentID != nil && strings.HasPrefix(n.Title, "big.md") {
+			begin := "--- BEGIN " + n.Title + " ---\n"
+			joined.WriteString(n.Prompt[strings.Index(n.Prompt, begin)+len(begin) : strings.LastIndex(n.Prompt, "\n--- END "+n.Title)])
+		}
+	}
+	if joined.String() != big {
+		t.Fatal("big.md's sections must cover the file exactly once")
+	}
+}
+
 func TestMergeGuardConsolidatesInParallelBatches(t *testing.T) {
 	h := setup(t, &fakeLLM{})
 	// Shrink the reducer model's context so 8 chunk results cannot fit one merge.

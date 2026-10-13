@@ -14,7 +14,7 @@ import (
 // context can take: a part much larger than a context would fail anyway.
 const (
 	defaultMaxFiles     = 64
-	defaultMaxFileBytes = 120_000 // roughly 30k tokens
+	defaultMaxFileBytes = 400_000 // roughly 100k tokens; the API splits large files into sections
 	maxTotalBytes       = 6 << 20 // under the API's 8 MiB body limit
 )
 
