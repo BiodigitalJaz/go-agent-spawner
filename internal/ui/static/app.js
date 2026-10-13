@@ -438,6 +438,9 @@ function treeView(root, id) {
     if (e.title && !n.title) n.title = e.title;
     switch (type) {
       case "node.started":
+        // The same phase starting again is a retry (e.g. after a shared
+        // context overflowed): drop the abandoned attempt's partial text.
+        if (!n.frozen && n.phase === e.role && (e.role === "exec" || e.role === "reduce")) { n.text = ""; n.think = ""; }
         if (e.role === "reduce") { n.reduceStarted ??= at; setStatus("reducing"); n.phase = "reduce"; }
         else {
           n.started ??= at;

@@ -25,8 +25,10 @@ const (
 // MaxExpandedParts agents.
 var ErrTooManyParts = errors.New("too many parts")
 
-// estTokens is the rough chars/4 estimate used for admission elsewhere.
-func estTokens(s string) int { return len(s) / 4 }
+// estTokens sizes parts for splitting at a conservative 3 characters per
+// token: dense text (book scans measured 1.9-3.4) at chars/4 made sections
+// that alone came near a model's whole context.
+func estTokens(s string) int { return len(s) / 3 }
 
 // expandParts splits every part larger than maxTokens into sections of at
 // most about maxTokens each, titled "<title> (section i/n)". maxTokens < 0

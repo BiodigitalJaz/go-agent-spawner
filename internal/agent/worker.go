@@ -109,11 +109,11 @@ func (w *Worker) Work(ctx context.Context, job *river.Job[TaskArgs]) error {
 		return w.outcome(ctx, t, w.reduceInCode(ctx, t))
 	}
 
-	tokens, err := w.estimate(ctx, t)
+	prompt, output, err := w.estimate(ctx, t)
 	if err != nil {
 		return err
 	}
-	lease, err := w.pool.AcquireTokens(ctx, a.Model, w.cfg.AcquireWait, tokens)
+	lease, err := w.pool.AcquireRequest(ctx, a.Model, w.cfg.AcquireWait, prompt, output)
 	switch {
 	case errors.Is(err, backend.ErrSaturated):
 		return river.JobSnooze(jitter(w.cfg.Snooze))
@@ -198,23 +198,25 @@ func snoozes(metadata []byte) int {
 // estimate sizes this job's model request (prompt plus reserved output) for
 // shared-context admission. A merge estimate is capped at what the merge
 // guard will actually send.
-func (w *Worker) estimate(ctx context.Context, t *task) (int, error) {
+func (w *Worker) estimate(ctx context.Context, t *task) (prompt, output int, err error) {
 	set, node := t.set, t.node
 	switch t.job.Args.Role {
 	case RolePlan:
-		return estimateRequest(planMessages(set, node, node.Depth+1 < set.MaxDepth), max(set.Planner.MaxTokens, 1024)), nil
+		prompt, output = estimateParts(planMessages(set, node, node.Depth+1 < set.MaxDepth), max(set.Planner.MaxTokens, 1024))
+		return prompt, output, nil
 	case RoleReduce:
 		children, err := store.Children(ctx, w.db, node.ID)
 		if err != nil {
-			return 0, err
+			return 0, 0, err
 		}
-		est := estimateRequest(reduceMessages(set, node, childItems(children)), set.Reducer.MaxTokens)
+		prompt, output = estimateParts(reduceMessages(set, node, childItems(children)), set.Reducer.MaxTokens)
 		if ctxLen := w.pool.ContextLength(t.job.Args.Model); ctxLen > 0 {
-			est = min(est, ctxLen*9/10)
+			prompt = max(min(prompt, ctxLen*9/10-output), 0)
 		}
-		return est, nil
+		return prompt, output, nil
 	default:
-		return estimateRequest(execMessages(set, node), set.Worker.MaxTokens), nil
+		prompt, output = estimateParts(execMessages(set, node), set.Worker.MaxTokens)
+		return prompt, output, nil
 	}
 }
 
@@ -297,7 +299,8 @@ func (w *Worker) plan(ctx context.Context, t *task, lease *backend.Lease) error 
 func (w *Worker) direct(ctx context.Context, t *task) error {
 	model := t.set.Worker.Model
 	if t.job.Args.Model == model {
-		lease, err := w.pool.AcquireTokens(ctx, model, w.cfg.AcquireWait, estimateRequest(execMessages(t.set, t.node), t.set.Worker.MaxTokens))
+		prompt, output := estimateParts(execMessages(t.set, t.node), t.set.Worker.MaxTokens)
+		lease, err := w.pool.AcquireRequest(ctx, model, w.cfg.AcquireWait, prompt, output)
 		if err == nil {
 			return w.exec(ctx, t, lease)
 		}
@@ -315,11 +318,42 @@ func (w *Worker) direct(ctx context.Context, t *task) error {
 
 func (w *Worker) exec(ctx context.Context, t *task, lease *backend.Lease) error {
 	w.publish(ctx, t.event(events.NodeStarted, RoleExec))
-	out, stats, err := w.generate(ctx, t, lease, request(lease, t.set.Worker, execMessages(t.set, t.node)))
+	msgs := execMessages(t.set, t.node)
+	out, stats, lease, err := w.generateRetrying(ctx, t, RoleExec, t.job.Args.Model, t.set.Worker, msgs, lease)
 	if err != nil {
 		return err
 	}
 	return w.complete(ctx, t, RoleExec, out, lease, stats)
+}
+
+// maxPressureRetries bounds in-job retries after a shared-context overflow.
+// They run inside the job, so they never use up an attempt or count against
+// River's snooze total (which queue waits also raise).
+const maxPressureRetries = 8
+
+// generateRetrying runs generate and, when the shared context overflowed,
+// waits briefly and re-admits the request: the overflow raised the model's
+// token ratio, so the retry reserves more and waits for real room.
+func (w *Worker) generateRetrying(ctx context.Context, t *task, role Role, model string, r settings.Role, msgs []llm.Message, lease *backend.Lease) (string, llm.Stats, *backend.Lease, error) {
+	for retry := 0; ; retry++ {
+		if retry > 0 {
+			w.publish(ctx, t.event(events.NodeStarted, role)) // a repeated start tells viewers to clear the partial text
+		}
+		out, stats, err := w.generate(ctx, t, lease, request(lease, r, msgs))
+		if err == nil || !llm.ContextPressure(err) || retry >= maxPressureRetries {
+			return out, stats, lease, err
+		}
+		w.log.Info("context full, retrying", "node", t.node.ID, "role", role, "retry", retry+1, "token_ratio", w.pool.TokenRatio(model))
+		select {
+		case <-time.After(jitter(time.Duration(retry+1) * 2 * time.Second)):
+		case <-ctx.Done():
+			return "", llm.Stats{}, lease, ctx.Err()
+		}
+		prompt, output := estimateParts(msgs, r.MaxTokens)
+		if lease, err = w.acquireRequest(ctx, model, prompt, output); err != nil {
+			return "", llm.Stats{}, lease, err
+		}
+	}
 }
 
 // reduce merges a node's children. If their results would not fit the
@@ -341,11 +375,12 @@ func (w *Worker) reduce(ctx context.Context, t *task, lease *backend.Lease) erro
 		if items, err = w.consolidate(ctx, t, model, items, budget); err != nil {
 			return err
 		}
-		if lease, err = w.acquire(ctx, model, estimateRequest(reduceMessages(t.set, t.node, items), t.set.Reducer.MaxTokens)); err != nil {
+		prompt, output := estimateParts(reduceMessages(t.set, t.node, items), t.set.Reducer.MaxTokens)
+		if lease, err = w.acquireRequest(ctx, model, prompt, output); err != nil {
 			return err
 		}
 	}
-	out, stats, err := w.generate(ctx, t, lease, request(lease, t.set.Reducer, reduceMessages(t.set, t.node, items)))
+	out, stats, lease, err := w.generateRetrying(ctx, t, RoleReduce, model, t.set.Reducer, reduceMessages(t.set, t.node, items), lease)
 	if err != nil {
 		return err
 	}
@@ -395,7 +430,8 @@ func (w *Worker) consolidate(ctx context.Context, t *task, model string, items [
 					next[i] = batch[0]
 					return nil
 				}
-				lease, err := w.acquire(gctx, model, estimateRequest(consolidateMessages(t.node, batch), t.set.Reducer.MaxTokens))
+				prompt, output := estimateParts(consolidateMessages(t.node, batch), t.set.Reducer.MaxTokens)
+				lease, err := w.acquireRequest(gctx, model, prompt, output)
 				if err != nil {
 					return err
 				}
@@ -424,9 +460,9 @@ func (w *Worker) consolidate(ctx context.Context, t *task, model string, items [
 // acquire waits for a slot (and context tokens) for as long as the job
 // allows; merges run inside one job, so snoozing back to the queue is not an
 // option here.
-func (w *Worker) acquire(ctx context.Context, model string, tokens int) (*backend.Lease, error) {
+func (w *Worker) acquireRequest(ctx context.Context, model string, prompt, output int) (*backend.Lease, error) {
 	for {
-		lease, err := w.pool.AcquireTokens(ctx, model, 30*time.Second, tokens)
+		lease, err := w.pool.AcquireRequest(ctx, model, 30*time.Second, prompt, output)
 		if !errors.Is(err, backend.ErrSaturated) {
 			return lease, err
 		}

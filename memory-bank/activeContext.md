@@ -6,7 +6,15 @@ _Last updated: 2026-10-12_
 **Deployed and live** on the user's cluster: namespace `agent-spawner`, console at http://192.168.1.64:30880 (NodePort 30880 on any node). See deployment.md for every detail. Next steps depend on the user.
 
 ## Recent changes
-### 2026-10-13: composer typing lag with no jobs running (0.1.17, branch `fix/list-prompt-preview`)
+### 2026-10-13: shared-context overflows on book text (0.1.19, branch `fix/context-admission`)
+- User's book-title run 2c280373 stalled 22+ min with LM Studio "Context size has been exceeded" (n_tokens ~14.5k per request, 32k context shared by 8 slots).
+- Causes: (1) admission estimated chars/4, but book text measured 3.4 chars/token median, 1.9 worst (25/29 requests above the estimate); (2) the "retry overflow without burning an attempt" path never fired: it shared River's snooze counter (limit 30) with queue-saturation snoozes, which reached 598-715 per job, so every overflow used up an attempt.
+- Fixes: pool learns real/estimated prompt-token ratio per model from response usage (`AcquireRequest`, moving mean + 1 deviation; overflow bumps ×1.25 before any observation, ×1.05 after); overflows are retried inside the job (`generateRetrying`, up to 8, re-admitting with the new ratio), never using an attempt; a repeated `node.started` tells the console to clear the abandoned attempt's partial text (also explains earlier card-text mismatches, unverified); splitting estimates chars/3.
+- Lesson: taking the maximum observed ratio (0.1.18) pinned it at 2.45 and serialized the pool (1 agent at a time, 25+ min). A mean + deviation is needed.
+- Structural limit: ~14k-token sections in a 32k shared context allow at most 2 concurrent; the old run's "7 running" was overflow churn.
+- Verified on 0.1.19: rerun of the same 17 book files (78 agents): 78/78 done, 4 overflow retries, 0 overflow failures (1 job timeout from slowness).
+- **LM Studio host slowed ~9x overnight** (prefill median 2,000-4,800 tok/s through 2026-10-13 01:29 UTC, ~520 tok/s from 13:28 UTC, also when idle: 9k-token prompt took 16 s). Cause on the host unknown (GPU offload/driver/other GPU load?); asked the user to check. Run timings after that point are not comparable with earlier ones.
+### 2026-10-13: composer typing lag with no jobs running (0.1.17, merged via PR #5; user confirmed "much better")
 - Cause: `GET /v1/trees?limit=100` returned every run's full prompt (document runs carry the whole document: max 364k chars; 3.1 MB total). The console refetched it every 10 s and kept ~3.1M characters in the sidebar beside the composer, so every keystroke cost ~23 ms.
 - Fix: listing sends `left(prompt, 400)` plus `prompt_chars` (`store.ListPromptChars`); the sidebar also cuts to 400; the run header shows a 2,000-char preview with click-to-expand.
 - Measured on the cluster (Playwright, ~25 s of steady typing, idle page): median 23 ms → 6 ms per key; listing 3.1 MB → 48 KB.

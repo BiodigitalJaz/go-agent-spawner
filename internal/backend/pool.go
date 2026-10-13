@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/url"
 	"reflect"
@@ -130,6 +131,78 @@ type model struct {
 	mu        sync.RWMutex
 	spec      []string             // configured endpoints (may change at runtime)
 	endpoints map[string]*Endpoint // resolved, keyed by base URL
+
+	ratio tokenRatio // learned real/estimated prompt tokens
+}
+
+// Prompt estimates (chars/4) run low for dense text: book text measured 1.9-3.4
+// chars per token, so admitted requests overflowed a shared context. Each
+// response's real prompt_tokens calibrates the estimate per model. The ratio
+// used is a moving mean plus one deviation: cautious about dense text without
+// letting one outlier serialize the pool (taking the maximum did, at 2.45 on
+// text that averaged 1.2). An overflow nudges the mean up; the rare overflow
+// that remains is retried inside the job.
+const (
+	minTokenRatio  = 1.0
+	maxTokenRatio  = 3.0
+	ratioAlpha     = 0.2  // weight of each new observation
+	pressureBump   = 1.05 // an overflow means the estimate was still low
+	coldBump       = 1.25 // before any real count, an overflow is the only evidence
+	ratioMinPrompt = 256  // tiny prompts are dominated by fixed overhead
+)
+
+type tokenRatio struct {
+	mu        sync.Mutex
+	n         int
+	mean, dev float64 // moving mean and variance of real/estimated
+}
+
+func (r *tokenRatio) value() float64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.n == 0 {
+		return max(r.mean, minTokenRatio)
+	}
+	return min(max(r.mean+math.Sqrt(r.dev), minTokenRatio), maxTokenRatio)
+}
+
+func (r *tokenRatio) observe(estimated, actual int) {
+	if estimated < ratioMinPrompt || actual <= 0 {
+		return
+	}
+	x := min(max(float64(actual)/float64(estimated), 0.5), maxTokenRatio)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.n == 0 {
+		r.mean, r.dev = max(r.mean, x), 0
+	} else {
+		d := x - r.mean
+		r.mean += ratioAlpha * d
+		r.dev = (1 - ratioAlpha) * (r.dev + ratioAlpha*d*d)
+	}
+	r.n++
+}
+
+func (r *tokenRatio) overflowed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	bump := pressureBump
+	if r.n == 0 {
+		bump = coldBump
+	}
+	r.mean = min(max(r.mean, minTokenRatio)*bump, maxTokenRatio)
+}
+
+func (m *model) tokenRatio() float64 { return m.ratio.value() }
+
+// TokenRatio reports the learned real/estimated prompt-token ratio (1 until
+// a response has been seen).
+func (p *Pool) TokenRatio(name string) float64 {
+	m, ok := p.get(name)
+	if !ok {
+		return minTokenRatio
+	}
+	return m.tokenRatio()
 }
 
 func (m *model) endpointSpec() []string {
@@ -305,6 +378,8 @@ type Lease struct {
 	tokens   int // reserved from the endpoint's shared context
 	pool     *Pool
 	once     sync.Once
+	model    *model
+	prompt   int // estimated prompt tokens before calibration, for learning
 }
 
 // PeerLoad is another worker's in-flight load on one endpoint.
@@ -341,6 +416,13 @@ func (l *Lease) Done(stats llm.Stats, err error) {
 			l.Endpoint.slotMu.Unlock()
 		}
 		l.Endpoint.recordTransport(transport)
+		if l.model != nil {
+			if llm.ContextPressure(err) {
+				l.model.ratio.overflowed()
+			} else if err == nil {
+				l.model.ratio.observe(l.prompt, stats.PromptTokens)
+			}
+		}
 		l.pool.signal()
 	})
 }
@@ -351,6 +433,23 @@ func (l *Lease) Done(stats llm.Stats, err error) {
 // replica instead of holding a worker slot.
 func (p *Pool) Acquire(ctx context.Context, name string, wait time.Duration) (*Lease, error) {
 	return p.AcquireTokens(ctx, name, wait, 0)
+}
+
+// AcquireRequest is AcquireTokens for a request whose prompt is estimated at
+// prompt tokens and which reserves output tokens. The prompt estimate is
+// scaled by the model's learned ratio, and the response's real prompt size
+// refines that ratio.
+func (p *Pool) AcquireRequest(ctx context.Context, name string, wait time.Duration, prompt, output int) (*Lease, error) {
+	m, ok := p.get(name)
+	if !ok {
+		return nil, fmt.Errorf("%w: %q", ErrUnknownModel, name)
+	}
+	tokens := int(float64(prompt)*m.tokenRatio()+0.5) + output
+	lease, err := p.AcquireTokens(ctx, name, wait, tokens)
+	if lease != nil {
+		lease.model, lease.prompt = m, prompt
+	}
+	return lease, err
 }
 
 // AcquireTokens is Acquire for a request of about tokens tokens (prompt plus
