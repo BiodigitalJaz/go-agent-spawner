@@ -6,7 +6,13 @@ _Last updated: 2026-10-12_
 **Deployed and live** on the user's cluster: namespace `agent-spawner`, console at http://192.168.1.64:30880 (NodePort 30880 on any node). See deployment.md for every detail. Next steps depend on the user.
 
 ## Recent changes
-### 2026-10-13: per-part word cap (0.1.13, branch `feat/part-max-words`)
+### 2026-10-13: console typing lag during live runs (0.1.16, branch `fix/console-typing-lag`)
+- Cause: the live run view repainted every 150 ms and rewrote every card (pill, meta, title, error), read each card's full prompt back via textContent (~60k chars × 32 cards), rebuilt timeline segments, and measured scroll per streaming card (forced layout each). Keystrokes in the composer waited behind it.
+- Fix: `once()` memo per card (write only on change), `patchChildren()` for timeline/axis, `streamInto()` appends deltas, scroll-follow tracked by scroll events and applied after all writes, task prompt shows a 600-char preview until clicked, `.card { content-visibility: auto }`.
+- Measured (Playwright, live 32-agent run on the cluster): keystroke 40 ms → 16–24 ms; locally renderCards 412 ms → ~0 per 5 s, layout 376 → 18 ms.
+- Streamed card text matched final outputs 32/32 on two checks; one earlier check showed 8 mismatches whose cause is unexplained (not retries; the code only appends to strictly growing text). Unverified: possibly a replay timing issue. Watch for it.
+- User's run edfcbbc3 (book titles, 10 books, 55 agents): the "Reply with one line" instruction also reached the llm merge, so the result was one title; splitting books into sections wasted agents (titles are on page 1); CBD Handbook section 1 failed with LM Studio "Context size has been exceeded". Suggested merge list + head of each file; offered a `head_tokens` option.
+### 2026-10-13: per-part word cap (0.1.13, merged via PR #3)
 - `part_max_words` (API, MCP run_task/analyze_files): appends "Keep your answer under N words…" after each part's text; the merge keeps the unchanged prompt. Opt-in (can drop items in extraction tasks).
 - Measured on the same 29-file docs input: **112 s** with a full-length final answer (3,862 chars), against 238 s uncapped and 113 s with the cap written into the prompt (final shrank to 801 chars).
 - Incident during the deploy: shared Postgres `default/postgresql-0` was OOMKilled (limit 192Mi with shared_buffers 128MB; 18 spawner connections plus large prompt rows). The API crash-looped on "connection refused" until it came back. **The user patched the StatefulSet to 512Mi limit / 256Mi request** (my patch was blocked by the permission classifier as a shared-resource change). It is Helm-managed (bitnami postgresql-16.7.4), so a `helm upgrade` would revert it unless `primary.resources` is set in values.
