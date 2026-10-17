@@ -56,6 +56,10 @@ type Stats struct {
 	MergePasses  int `json:"merge_passes,omitempty"`
 	MergeBatches int `json:"merge_batches,omitempty"`
 	Truncated    int `json:"truncated,omitempty"`
+	// Checked: the final answer went through the rules check against the
+	// tree's reference material; CheckError says why it could not.
+	Checked    bool   `json:"checked,omitempty"`
+	CheckError string `json:"check_error,omitempty"`
 }
 
 type Event struct {

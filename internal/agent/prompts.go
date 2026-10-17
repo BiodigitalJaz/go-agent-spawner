@@ -78,7 +78,8 @@ func withReference(set *settings.Settings, task string) string {
 func planMessages(set *settings.Settings, node *store.Node, canNest bool) []llm.Message {
 	rules := planRules(set.MaxChildren, canNest)
 	if strings.TrimSpace(set.Context) != "" {
-		rules += "\n\nEvery worker also receives the reference material below, so subtask prompts may refer to it."
+		rules += "\n\nEvery worker also receives the reference material below, so subtask prompts may refer to it." +
+			" When the reference has both material under review and guidelines to respect, each subtask reviews the material against the guidelines and proposes concrete changes to the material; subtasks never evaluate, praise or restate the guidelines themselves."
 	}
 	return []llm.Message{
 		{Role: "system", Content: strings.TrimSpace(set.Planner.Directive) + "\n\n" + rules},
@@ -124,6 +125,20 @@ func reduceMessages(set *settings.Settings, node *store.Node, items []mergeItem)
 	return []llm.Message{
 		{Role: "system", Content: set.Reducer.Directive},
 		{Role: "user", Content: withReference(set, fmt.Sprintf("Original task:\n%s\n\nResults from parallel workers:\n%s", node.Prompt, itemsBlock(items)))},
+	}
+}
+
+// checkDirective drives the rules check of a final answer.
+const checkDirective = `You check an answer against reference material that states facts and rules (what to do and what not to do).
+
+Find every statement or recommendation in the answer that conflicts with a rule or contradicts a fact in the reference, or that claims something the reference does not support. Then return the answer with each of those fixed so it complies, or removed if it cannot be fixed. Keep everything else exactly as it was, including formatting.
+
+After the answer, add a section headed "### Rules check" that lists each change in one line: what was changed or removed, and the rule or fact it conflicted with (quote it briefly). If nothing conflicts, keep the answer unchanged and write "No conflicts with the reference found." under that heading. Respond with the checked answer and that section only.`
+
+func checkMessages(set *settings.Settings, node *store.Node, answer string) []llm.Message {
+	return []llm.Message{
+		{Role: "system", Content: checkDirective},
+		{Role: "user", Content: withReference(set, fmt.Sprintf("Original task:\n%s\n\nAnswer to check:\n--- BEGIN ANSWER ---\n%s\n--- END ANSWER ---", node.Prompt, answer))},
 	}
 }
 

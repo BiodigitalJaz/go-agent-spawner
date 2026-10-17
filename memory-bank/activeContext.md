@@ -6,7 +6,15 @@ _Last updated: 2026-10-12_
 **Deployed and live** on the user's cluster: namespace `agent-spawner`, console at http://192.168.1.64:30880 (NodePort 30880 on any node). See deployment.md for every detail. Next steps depend on the user.
 
 ## Recent changes
-### 2026-10-17: grounded inputs, URL fetching, delete runs (0.1.25, branch `feat/grounded-inputs`, built on PR #8)
+### 2026-10-17: per-agent sizing + rules check (0.1.27, branch `feat/fit-and-check`)
+- LM Studio confirmed back at 32,000 context / 8 slots (the user reloaded it).
+- Per-agent sizing (`agent.PartBudget`, `agent.MaxReferenceChars`, API `fitToModel`): reference may take 40% of the worker model's context (38,400 chars at 32k); each agent's own input gets 90% of context minus reference, instruction and output reserve; parts get a lower max_part_tokens and documents more chunks when needed (response `sizing`); 400 if the reference leaves no room.
+- Rules check (setting `check_answer`, default on, no omitempty; request/MCP `check`; composer "Rules check" box): when a tree has reference material and the root answer is model-written (direct exec or llm merge), one more pass with the reducer model fixes/removes conflicting recommendations and appends "### Rules check". Root stats `checked` / `check_error`; failure keeps the unchecked answer with a note.
+- Reference roles: with fetched pages plus supplied context, the reference is labelled "MATERIAL UNDER REVIEW" and "GUIDELINES AND FACTS TO RESPECT"; planner rule: review the material against the guidelines, never evaluate the guidelines. Without labels the planner had the workers review BRAND.md itself.
+- Reducer directive: "write the answer itself, never a description of the workers" (live settings v4 -> v5); without it the merge narrated "no contradictions found".
+- Antrado test with BRAND.md + brand pack (extracted from docs run 183baec7) + fetched page: final answer audits the site against the rules, zero items from the peer review's reject list. Limits: fetch is text only, so design findings were hedged ("likely"); product facts not on the page (stale "no prices yet") need a facts note as reference.
+- Not built (offered): MCP `context_files` to read local files into the reference.
+### 2026-10-17: grounded inputs, URL fetching, delete runs (0.1.25, merged via PR #9; River UI removal merged via PR #8)
 - Trigger: run 0e2c6173 ("Have a look at https://antrado.com…") gave workers a ~70-token prompt with only the URL; agents cannot browse, so each invented a different company and the merge guessed. Another agent's critique was correct.
 - Directives (code defaults and live settings v3 -> v4): workers work only from task + reference and say what is missing instead of guessing; planner does not split work on unseen content; merge stops on contradictions and keeps recommendations consistent with the reference.
 - `context` (API/MCP/console "Reference" box): reference material every agent gets (planner, workers, merge), stored once in `agent_tree.context` (migration 006), max 24,000 chars, shown collapsed in the run view.

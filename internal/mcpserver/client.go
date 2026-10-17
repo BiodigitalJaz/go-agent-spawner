@@ -94,6 +94,7 @@ type CreateTree struct {
 	PartMaxWords  int    `json:"part_max_words,omitempty"`
 	Context       string `json:"context,omitempty"`
 	FetchURLs     bool   `json:"fetch_urls,omitempty"`
+	Check         *bool  `json:"check,omitempty"`
 }
 
 func (c *Client) CreateTree(ctx context.Context, auth string, req CreateTree) (string, error) {

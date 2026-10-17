@@ -323,6 +323,11 @@ function buildComposer() {
   // Agents cannot browse; linked pages are fetched into the reference.
   const fetchUrls = h("input", { type: "checkbox", checked: true, "aria-label": "Fetch linked pages" });
   const fetchLabel = h("label", { class: "check", title: "Download the web pages linked in the prompt and give their text to every agent. Agents cannot open links themselves." }, fetchUrls, " Fetch linked pages");
+  // Rules check of the final answer against the reference (default from settings).
+  const checkAnswer = h("input", { type: "checkbox", checked: app.settings?.settings?.check_answer !== false, "aria-label": "Rules check" });
+  let checkTouched = false;
+  checkAnswer.addEventListener("change", () => { checkTouched = true; });
+  const checkLabel = h("label", { class: "check", title: "When there is reference material, check the final answer against it: recommendations that conflict with it are removed or fixed, and the changes are listed." }, checkAnswer, " Rules check");
 
   function refreshModels() {
     const s = app.settings?.settings;
@@ -332,6 +337,7 @@ function buildComposer() {
       ...app.models.map((m) => h("option", { value: m.name }, `Worker model: ${m.name} — ${m.model}`)));
     model.value = current;
     if (s) {
+      if (!checkTouched) checkAnswer.checked = s.check_answer !== false;
       depth.placeholder = `depth ${s.max_depth}`;
       children.placeholder = `fan-out ${s.max_children}`;
     }
@@ -348,6 +354,7 @@ function buildComposer() {
     if (merge.value) body.merge = merge.value;
     if (reference.value.trim()) body.context = reference.value;
     body.fetch_urls = fetchUrls.checked;
+    body.check = checkAnswer.checked;
     run.disabled = true;
     try {
       const res = await api("POST", "/v1/trees", body);
@@ -376,6 +383,7 @@ function buildComposer() {
     docBox,
     h("div", { class: "actions" },
       fetchLabel,
+      checkLabel,
       h("span", { class: "faint", style: "font-size:12px" }, "Overrides apply to this run only"),
       run));
   return { el, refreshModels };
@@ -817,6 +825,8 @@ function treeView(root, id) {
         st?.merge_batches ? h("span", { title: "Results exceeded the merge context, so they were consolidated in parallel batches first" },
           "merged via ", h("b", {}, st.merge_batches), ` batches / ${st.merge_passes} pass${st.merge_passes === 1 ? "" : "es"}`) : null,
         st?.truncated ? h("span", { class: "warn-text", title: "Inputs that alone exceeded the merge context were cut (marked in the text)" }, `⚠ ${st.truncated} truncated`) : null,
+        st?.checked ? h("span", { title: "The final answer was checked against the reference material; see the Rules check section" }, "✓ rules-checked") : null,
+        st?.check_error ? h("span", { class: "warn-text", title: st.check_error }, "⚠ rules check failed") : null,
       ].filter(Boolean)));
 
       // Compare against the last value written, never read textContent
@@ -1072,6 +1082,11 @@ function settingsView(root) {
             onchange: (e) => { if (e.target.checked) form.allow_internal_fetch = true; else delete form.allow_internal_fetch; updateBar(); } }),
             " Allow fetching internal network addresses"),
           h("span", { class: "note" }, "Off by default. When on, “Fetch linked pages” may reach private, loopback, link-local and cluster addresses (internal wikis, dashboards, services). Every attempt on an internal address is logged by the API, allowed or blocked.")),
+        h("label", { class: "field check-field" },
+          h("span", {}, h("input", { type: "checkbox", checked: form.check_answer !== false,
+            onchange: (e) => { form.check_answer = e.target.checked; updateBar(); } }),
+            " Check the final answer against the reference"),
+          h("span", { class: "note" }, "On by default. When a run has reference material, its final answer gets one more pass: recommendations that conflict with the reference are removed or fixed, and a “Rules check” section lists each change. Runs can turn it off with the composer’s “Rules check” box.")),
         h("div", { class: "explain" },
           h("b", {}, "Merge:"), " LLM writes a combined answer (any task, +1 model call). ",
           h("b", {}, "List"), " and ", h("b", {}, "concat"), " combine results in code with no model call — for list-shaped or independent outputs. ",
