@@ -6,6 +6,15 @@ _Last updated: 2026-10-12_
 **Deployed and live** on the user's cluster: namespace `agent-spawner`, console at http://192.168.1.64:30880 (NodePort 30880 on any node). See deployment.md for every detail. Next steps depend on the user.
 
 ## Recent changes
+### 2026-10-17: grounded inputs, URL fetching, delete runs (0.1.25, branch `feat/grounded-inputs`, built on PR #8)
+- Trigger: run 0e2c6173 ("Have a look at https://antrado.com…") gave workers a ~70-token prompt with only the URL; agents cannot browse, so each invented a different company and the merge guessed. Another agent's critique was correct.
+- Directives (code defaults and live settings v3 -> v4): workers work only from task + reference and say what is missing instead of guessing; planner does not split work on unseen content; merge stops on contradictions and keeps recommendations consistent with the reference.
+- `context` (API/MCP/console "Reference" box): reference material every agent gets (planner, workers, merge), stored once in `agent_tree.context` (migration 006), max 24,000 chars, shown collapsed in the run view.
+- `fetch_urls` (console "Fetch linked pages", default on; MCP default true): fetches up to 5 linked pages (internal/fetch: HTML -> text via x/net/html, 5 MB, 20 s) into the context. A linked prompt without fetch or content -> 400.
+- SSRF guard: private/loopback/link-local/CGNAT/multicast blocked at dial time (after DNS, on every redirect); setting `allow_internal_fetch` (Settings checkbox, off by default) allows it. Every internal attempt logged ("fetch blocked: internal address" / "fetch of internal address allowed by settings").
+- Delete runs: `DELETE /v1/trees/{id}?purge=1` deletes agent_tree, agent_node, river_job rows and the tree's NATS events; 409 while active. Console "Delete" / "Cancel & delete" button. Logged ("tree deleted").
+- Verified on the cluster: bare URL 400; 192.168.1.64 fetch 403 + log; antrado rerun e9db8600 grounded in the real page (61 s, 4 agents, 0 overflows; one worker reported missing brand guidelines instead of guessing); Playwright: delete, cancel-and-delete, controls, no console errors.
+- LM Studio events today: the 9B was idle-unloaded (TTL 1 h); the user loaded unsloth/qwen3.8-27b; on-demand 9B load crashed (GPU memory, likely); the user ejected the 27B and loaded the 9B again **at 16,384 context (parallel 8)** while the spawner model config says 32,000. Pending the user's choice: reload at 32k or set the spawner's qwen9b-fast context to 16384.
 ### 2026-10-17: River UI removed from the stack (branch `chore/remove-riverui`)
 - It was an unused, unauthenticated job inspector holding the spawner's full DB credentials and Postgres connections. Removed from the base kustomization, docker-compose and README; deleted the running Deployment and Service from `agent-spawner` (kubectl apply does not prune). The River Go library (the queue) stays. For job-level debugging, query `river_job` or run riverui temporarily against DATABASE_URL.
 ### 2026-10-17: Markdown rendering in the console (0.1.22, merged via PR #7; user confirmed after a page reload; open tabs keep old JS until reloaded)

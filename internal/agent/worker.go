@@ -369,7 +369,7 @@ func (w *Worker) reduce(ctx context.Context, t *task, lease *backend.Lease) erro
 
 	model := t.job.Args.Model
 	items := childItems(children)
-	budget := mergeBudget(w.pool.ContextLength(model), t.set.Reducer, t.set.Reducer.Directive+t.node.Prompt)
+	budget := mergeBudget(w.pool.ContextLength(model), t.set.Reducer, t.set.Reducer.Directive+t.node.Prompt+t.set.Context)
 	if totalTokens(items) > budget {
 		lease.Done(llm.Stats{}, nil) // batches take their own slots
 		if items, err = w.consolidate(ctx, t, model, items, budget); err != nil {

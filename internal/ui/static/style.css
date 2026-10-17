@@ -409,3 +409,15 @@ details.thinking.live summary .lbl::after { content: "…"; animation: pulse 1.2
 .out.md th, .out.md td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; vertical-align: top; }
 .out.md th { background: var(--panel-2); font-weight: 600; }
 .section-title .title-actions { display: inline-flex; gap: 6px; }
+
+/* Document & reference inputs, fetch toggle, reference viewer. */
+.docbox .doc-label { font-size: 12px; font-weight: 600; margin-top: 8px; }
+.docbox .doc-label .faint { font-weight: 400; }
+.composer .check { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; white-space: nowrap; }
+.composer .actions { gap: 10px; }
+.check-field > span:first-child { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+.check-field .note { font-size: 12px; color: var(--muted); font-weight: 400; }
+.refbox { margin: 0 0 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); padding: 8px 12px; }
+.refbox summary { cursor: pointer; font-size: 13px; color: var(--muted); }
+.refbox pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; max-height: 360px; overflow: auto; margin: 8px 0 0; }
+.limits .check-field { grid-column: 1 / -1; }

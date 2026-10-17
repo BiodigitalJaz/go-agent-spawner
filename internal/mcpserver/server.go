@@ -39,6 +39,7 @@ type server struct {
 
 const instructions = `Agent Spawner runs work on a pool of local LLM agents in parallel and merges the results.
 Use it to offload bulk reading or per-item work: long documents, many files, logs.
+- The agents cannot browse or read files: they see only what you send. Put shared reference material (a page under review, rules the answer must respect) in "context"; links in the prompt are fetched into it by default.
 - run_task: a prompt, optionally with a long "document" (split into chunks automatically) or explicit "parts" (one agent each).
 - analyze_files: one agent per local file, e.g. "list every TODO and its function" across a package.
 - merge: "list" for extraction and lists (fastest; distinct lines), "concat" for per-item outputs such as per-file reviews (verbatim), "llm" when one synthesized answer is needed.
@@ -53,7 +54,7 @@ func New(api *Client, opts Options) *mcp.Server {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "run_task",
 		Title:       "Run a task on the agent pool",
-		Description: "Run a prompt on the local agent pool and return the merged result. Give a long input as `document` (split into parallel chunks automatically: one context up to about 6k tokens, otherwise 4+ chunks) or as `parts` (one agent per part). Waits for the result by default, reporting progress.",
+		Description: "Run a prompt on the local agent pool and return the merged result. Agents cannot browse: give them what they need. Shared reference material that every agent should see (a page under review, rules to respect) goes in `context`; a long input to split goes in `document` (chunked automatically: one context up to about 6k tokens, otherwise 4+ chunks); separate items go in `parts` (one agent per part). Web links in the prompt are fetched into the context unless fetch_urls is false. Waits for the result by default, reporting progress.",
 		Annotations: &mcp.ToolAnnotations{Title: "Run task", OpenWorldHint: boolPtr(false)},
 	}, s.runTask)
 
@@ -107,6 +108,8 @@ type RunInput struct {
 	Document       string `json:"document,omitempty" jsonschema:"a long input to split into chunks handled in parallel"`
 	Parts          []Part `json:"parts,omitempty" jsonschema:"inputs given one agent each, such as files; titles name them in the result"`
 	Chunks         int    `json:"chunks,omitempty" jsonschema:"number of chunks for document; 0 picks automatically (1 up to about 6k tokens, else 4 or more)"`
+	Context        string `json:"context,omitempty" jsonschema:"reference material every agent receives (planner, workers and merge): a page you fetched, rules the answer must respect. Up to about 24,000 characters"`
+	FetchURLs      *bool  `json:"fetch_urls,omitempty" jsonschema:"fetch the web pages linked in the prompt into the context (default true). Set false if you pass the page content yourself"`
 	PartMaxWords   int    `json:"part_max_words,omitempty" jsonschema:"ask each part's agent for an answer under this many words; the final merge keeps full length. For summaries with merge llm, 100-150 roughly halves the time. Avoid for extraction (lists of every X), where it can drop items"`
 	MaxPartTokens  int    `json:"max_part_tokens,omitempty" jsonschema:"parts larger than this many tokens are split into sections, one agent each (default 16000; -1 keeps parts whole)"`
 	Merge          string `json:"merge,omitempty" jsonschema:"how results are combined: list (distinct lines, for extraction), concat (verbatim, per-item outputs) or llm (synthesized answer); default is the server setting" enum:"list,concat,llm"`
@@ -124,6 +127,7 @@ type FilesInput struct {
 	Merge          string   `json:"merge,omitempty" jsonschema:"concat (default: each file's output verbatim), list (distinct lines) or llm (one synthesized answer)" enum:"concat,list,llm"`
 	MaxFiles       int      `json:"max_files,omitempty" jsonschema:"at most this many files (default and maximum 64)"`
 	MaxFileBytes   int      `json:"max_file_bytes,omitempty" jsonschema:"skip files larger than this (default 400000 bytes)"`
+	Context        string   `json:"context,omitempty" jsonschema:"reference material every file's agent receives, e.g. coding standards or rules to check against"`
 	PartMaxWords   int      `json:"part_max_words,omitempty" jsonschema:"ask each part's agent for an answer under this many words; the final merge keeps full length. For summaries with merge llm, 100-150 roughly halves the time. Avoid for extraction (lists of every X), where it can drop items"`
 	MaxPartTokens  int      `json:"max_part_tokens,omitempty" jsonschema:"files larger than this many tokens are split into sections, one agent each (default 16000; -1 keeps files whole)"`
 	Model          string   `json:"model,omitempty" jsonschema:"worker model name; default is the server setting"`
@@ -170,7 +174,8 @@ func (s *server) runTask(ctx context.Context, req *mcp.CallToolRequest, in RunIn
 	if strings.TrimSpace(in.Prompt) == "" {
 		return nil, RunOutput{}, errors.New("prompt is required")
 	}
-	body := CreateTree{Prompt: in.Prompt, Priority: in.Priority, Model: in.Model, MaxDepth: in.MaxDepth, Merge: in.Merge, Parts: in.Parts, MaxPartTokens: in.MaxPartTokens, PartMaxWords: in.PartMaxWords}
+	body := CreateTree{Prompt: in.Prompt, Priority: in.Priority, Model: in.Model, MaxDepth: in.MaxDepth, Merge: in.Merge, Parts: in.Parts, MaxPartTokens: in.MaxPartTokens, PartMaxWords: in.PartMaxWords,
+		Context: in.Context, FetchURLs: in.FetchURLs == nil || *in.FetchURLs}
 	chunks := 0
 	if len(in.Parts) == 0 && in.Document != "" {
 		chunks = in.Chunks
@@ -201,7 +206,7 @@ func (s *server) analyzeFiles(ctx context.Context, req *mcp.CallToolRequest, in 
 	if merge == "" {
 		merge = "concat"
 	}
-	body := CreateTree{Prompt: in.Instruction, Model: in.Model, Merge: merge, Parts: got.Parts, MaxPartTokens: in.MaxPartTokens, PartMaxWords: in.PartMaxWords}
+	body := CreateTree{Prompt: in.Instruction, Model: in.Model, Merge: merge, Parts: got.Parts, MaxPartTokens: in.MaxPartTokens, PartMaxWords: in.PartMaxWords, Context: in.Context}
 	return s.start(ctx, req, body, len(got.Parts), got.Skipped, in.Wait, in.TimeoutSeconds)
 }
 

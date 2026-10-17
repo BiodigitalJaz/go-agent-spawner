@@ -367,3 +367,13 @@ func (b *Bus) WatchModelsChanged(ctx context.Context, fn func()) error {
 	}()
 	return nil
 }
+
+// PurgeTree removes a tree's events (token streams, progress) from the
+// replay window.
+func (b *Bus) PurgeTree(ctx context.Context, treeID uuid.UUID) error {
+	stream, err := b.js.Stream(ctx, streamName)
+	if err != nil {
+		return err
+	}
+	return stream.Purge(ctx, jetstream.WithPurgeSubject(fmt.Sprintf("%s%s.>", subjectPrefix, treeID)))
+}

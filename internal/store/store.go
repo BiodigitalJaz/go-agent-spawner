@@ -339,3 +339,32 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger) error {
 		return nil
 	})
 }
+
+// ErrTreeBusy means a tree still has running jobs, so it cannot be purged.
+var ErrTreeBusy = errors.New("tree still has running jobs")
+
+// PurgeTree deletes every record of a tree: its River jobs, its nodes (with
+// their prompts and outputs) and the tree row (prompt, settings snapshot,
+// reference material). Call it in a transaction, on a finished tree.
+func PurgeTree(ctx context.Context, db DBTX, treeID uuid.UUID) (nodes, jobs int64, err error) {
+	var running int
+	if err := db.QueryRow(ctx, `SELECT count(*) FROM river_job WHERE args->>'tree_id' = $1 AND state = 'running'`, treeID.String()).Scan(&running); err != nil {
+		return 0, 0, err
+	}
+	if running > 0 {
+		return 0, 0, ErrTreeBusy
+	}
+	tag, err := db.Exec(ctx, `DELETE FROM river_job WHERE args->>'tree_id' = $1`, treeID.String())
+	if err != nil {
+		return 0, 0, err
+	}
+	jobs = tag.RowsAffected()
+	if tag, err = db.Exec(ctx, `DELETE FROM agent_node WHERE tree_id = $1`, treeID); err != nil {
+		return 0, 0, err
+	}
+	nodes = tag.RowsAffected()
+	if _, err = db.Exec(ctx, `DELETE FROM agent_tree WHERE id = $1`, treeID); err != nil {
+		return 0, 0, err
+	}
+	return nodes, jobs, nil
+}

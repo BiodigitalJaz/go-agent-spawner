@@ -646,6 +646,106 @@ func TestGivenPartsOneAgentEach(t *testing.T) {
 	}
 }
 
+func TestContextReachesEveryAgent(t *testing.T) {
+	llm := &fakeLLM{split: []string{"Review the tone.", "Review the visuals."}}
+	h := setup(t, llm)
+	started, err := agent.StartTree(context.Background(), h.db, h.client, agent.TreeRequest{
+		Prompt: "SPLIT: review this page", Priority: 1, Settings: h.set, Context: "PAGE: We do not claim it makes money.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evs := h.collect(t, started.Root.TreeID)
+	if last := evs[len(evs)-1]; last.Type != events.TreeDone {
+		t.Fatalf("tree failed: %+v", last)
+	}
+	llm.mu.Lock()
+	defer llm.mu.Unlock()
+	var plan, workers, merge int
+	for _, p := range llm.prompts {
+		has := strings.Contains(p, "--- BEGIN REFERENCE ---\nPAGE: We do not claim it makes money.\n--- END REFERENCE ---")
+		switch {
+		case strings.Contains(p, "SPLIT: review this page") && !strings.Contains(p, "Results from parallel workers"):
+			if has {
+				plan++
+			}
+		case strings.Contains(p, "Results from parallel workers"):
+			if has {
+				merge++
+			}
+		case strings.Contains(p, "Review the"):
+			if has {
+				workers++
+			}
+		}
+	}
+	if plan != 1 || workers != 2 || merge != 1 {
+		t.Fatalf("reference missing: planner %d/1, workers %d/2, merge %d/1", plan, workers, merge)
+	}
+	snap, err := settings.ForTree(context.Background(), h.db, started.Root.TreeID)
+	if err != nil || snap.Context != "PAGE: We do not claim it makes money." {
+		t.Fatalf("context not stored with the tree: %+v %v", snap, err)
+	}
+}
+
+func TestPurgeTreeRemovesEveryRecord(t *testing.T) {
+	h := setup(t, &fakeLLM{split: []string{"one", "two"}})
+	ctx := context.Background()
+	started, err := agent.StartTree(ctx, h.db, h.client, agent.TreeRequest{
+		Prompt: "SPLIT: purge me", Priority: 1, Settings: h.set, Context: "secret reference",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := started.Root.TreeID
+	if evs := h.collect(t, id); evs[len(evs)-1].Type != events.TreeDone {
+		t.Fatal("tree did not finish")
+	}
+	count := func(q string) (n int) {
+		if err := h.db.QueryRow(ctx, q, id.String()).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if count(`SELECT count(*) FROM agent_node WHERE tree_id::text = $1`) == 0 || count(`SELECT count(*) FROM river_job WHERE args->>'tree_id' = $1`) == 0 {
+		t.Fatal("expected records before the purge")
+	}
+	var nodes, jobs int64
+	err = pgx.BeginFunc(ctx, h.db, func(tx pgx.Tx) error {
+		nodes, jobs, err = store.PurgeTree(ctx, tx, id)
+		return err
+	})
+	if err != nil || nodes != 3 || jobs != 4 { // root + 2 parts; plan, 2 exec, reduce
+		t.Fatalf("purge: nodes %d jobs %d err %v", nodes, jobs, err)
+	}
+	if err := h.bus.PurgeTree(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`SELECT count(*) FROM agent_tree WHERE id::text = $1`,
+		`SELECT count(*) FROM agent_node WHERE tree_id::text = $1`,
+		`SELECT count(*) FROM river_job WHERE args->>'tree_id' = $1`,
+	} {
+		if n := count(q); n != 0 {
+			t.Fatalf("%s: %d rows left", q, n)
+		}
+	}
+	// No events remain to replay.
+	sctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	msgs, err := h.bus.Subscribe(sctx, id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case m, ok := <-msgs:
+		if ok {
+			t.Fatalf("event left after purge: %s", m.Event.Type)
+		}
+	case <-sctx.Done():
+	}
+}
+
 func TestPartMaxWordsCapsPartsNotTheMerge(t *testing.T) {
 	llm := &fakeLLM{}
 	h := setup(t, llm)

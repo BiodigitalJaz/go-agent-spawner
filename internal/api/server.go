@@ -91,6 +91,12 @@ type createRequest struct {
 	// PartMaxWords asks each part's agent for a short answer; the merge
 	// keeps the full prompt.
 	PartMaxWords int `json:"part_max_words,omitempty"`
+	// Context is reference material sent to every agent (planner, workers
+	// and merge), e.g. a page under review or rules the answer must respect.
+	Context string `json:"context,omitempty"`
+	// FetchURLs downloads the web pages the prompt links to and adds their
+	// text to the context. Without it (or content), a linked page is refused.
+	FetchURLs bool `json:"fetch_urls,omitempty"`
 }
 
 func (s *Server) createTree(w http.ResponseWriter, r *http.Request) {
@@ -147,10 +153,20 @@ func (s *Server) createTree(w http.ResponseWriter, r *http.Request) {
 	if req.Priority == 0 {
 		req.Priority = 1
 	}
+	reference, fetched, err := s.reference(r.Context(), &req, set, r.RemoteAddr)
+	if err != nil {
+		var re *requestError
+		if errors.As(err, &re) {
+			httpError(w, re.status, re.msg)
+			return
+		}
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 
 	started, err := agent.StartTree(r.Context(), s.db, s.river, agent.TreeRequest{
 		Prompt: req.Prompt, Priority: req.Priority, Settings: set, Document: req.Document, Chunks: req.Chunks, Parts: req.Parts,
-		MaxPartTokens: req.MaxPartTokens, PartMaxWords: req.PartMaxWords,
+		MaxPartTokens: req.MaxPartTokens, PartMaxWords: req.PartMaxWords, Context: reference,
 	})
 	if errors.Is(err, agent.ErrTooManyParts) {
 		httpError(w, http.StatusBadRequest, err.Error())
@@ -173,10 +189,15 @@ func (s *Server) createTree(w http.ResponseWriter, r *http.Request) {
 		_ = s.bus.Publish(r.Context(), events.Event{Type: events.NodeSplit, TreeID: root.TreeID, NodeID: root.ID, Role: string(agent.RolePlan),
 			Text: splitReason(req, len(kids)), Children: kids})
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{
+	resp := map[string]any{
 		"tree_id":    root.TreeID,
 		"events_url": fmt.Sprintf("/v1/trees/%s/events", root.TreeID),
-	})
+	}
+	if len(fetched) > 0 {
+		resp["fetched"] = fetched
+		s.log.Info("tree started with fetched pages", "tree", root.TreeID, "pages", len(fetched), "context_chars", len(reference))
+	}
+	writeJSON(w, http.StatusCreated, resp)
 }
 
 func (s *Server) listTrees(w http.ResponseWriter, r *http.Request) {
@@ -227,6 +248,7 @@ func (s *Server) getTree(w http.ResponseWriter, r *http.Request) {
 		"status":     root.Status,
 		"created_at": root.CreatedAt,
 		"settings":   set,
+		"context":    treeContext(set),
 		"nodes":      nodes,
 	})
 }
@@ -236,6 +258,10 @@ func (s *Server) cancelTree(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if p := r.URL.Query().Get("purge"); p == "1" || p == "true" {
+		s.purgeTree(w, r, id)
+		return
+	}
 	n, err := agent.CancelTree(r.Context(), s.db, s.river, s.bus, id)
 	if err != nil {
 		s.log.Error("cancel tree", "tree", id, "err", err)
@@ -243,6 +269,44 @@ func (s *Server) cancelTree(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"tree_id": id, "cancelled_jobs": n})
+}
+
+// purgeTree deletes every record of a finished tree (DELETE ?purge=1): its
+// nodes, prompts, outputs, reference material, River jobs and live events.
+// An active tree must be cancelled first, so no agent writes after the purge.
+func (s *Server) purgeTree(w http.ResponseWriter, r *http.Request, id uuid.UUID) {
+	root, err := store.GetNode(r.Context(), s.db, id)
+	if errors.Is(err, store.ErrNotFound) {
+		httpError(w, http.StatusNotFound, "tree not found")
+		return
+	}
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !root.Status.Terminal() {
+		httpError(w, http.StatusConflict, "the run is still active; cancel it first, then delete")
+		return
+	}
+	var nodes, jobs int64
+	err = pgx.BeginFunc(r.Context(), s.db, func(tx pgx.Tx) error {
+		nodes, jobs, err = store.PurgeTree(r.Context(), tx, id)
+		return err
+	})
+	if errors.Is(err, store.ErrTreeBusy) {
+		httpError(w, http.StatusConflict, "agents are still stopping; try again in a few seconds")
+		return
+	}
+	if err != nil {
+		s.log.Error("purge tree", "tree", id, "err", err)
+		httpError(w, http.StatusInternalServerError, "delete failed")
+		return
+	}
+	if err := s.bus.PurgeTree(r.Context(), id); err != nil {
+		s.log.Warn("purge tree events", "tree", id, "err", err) // they expire with the replay window anyway
+	}
+	s.log.Info("tree deleted", "tree", id, "nodes", nodes, "jobs", jobs, "remote", r.RemoteAddr)
+	writeJSON(w, http.StatusOK, map[string]any{"tree_id": id, "deleted": true, "nodes": nodes, "jobs": jobs})
 }
 
 func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
@@ -725,4 +789,11 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func httpError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+func treeContext(set *settings.Settings) string {
+	if set == nil {
+		return ""
+	}
+	return set.Context
 }
