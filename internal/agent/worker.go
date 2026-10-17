@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -326,6 +327,36 @@ func (w *Worker) exec(ctx context.Context, t *task, lease *backend.Lease) error 
 	return w.complete(ctx, t, RoleExec, out, lease, stats)
 }
 
+// checkAnswer runs the rules check on a root's final answer with the
+// reducer model. The repeated node.started makes viewers replace the shown
+// answer with the checked one as it streams.
+func (w *Worker) checkAnswer(ctx context.Context, t *task, role Role, answer string) (string, error) {
+	model := t.set.Reducer.Model
+	msgs := checkMessages(t.set, t.node, answer)
+	r := t.set.Reducer
+	if r.MaxTokens > 0 { // the checked answer is about as long as the answer
+		r.MaxTokens = max(r.MaxTokens, estimateTokens(answer)+800)
+	}
+	prompt, output := estimateParts(msgs, r.MaxTokens)
+	output = max(output, estimateTokens(answer)+800)
+	lease, err := w.acquireRequest(ctx, model, prompt, output)
+	if err != nil {
+		return "", err
+	}
+	w.publish(ctx, t.event(events.NodeStarted, role))
+	note := w.bus.Deltas(events.Thinking, t.node.TreeID, t.node.ID, w.cfg.DeltaInterval)
+	note.Write("Rules check: reviewing the answer against the reference material.\n")
+	note.Close()
+	out, _, _, err := w.generateRetrying(ctx, t, role, model, r, msgs, lease)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(out) == "" {
+		return "", errors.New("the check returned nothing")
+	}
+	return out, nil
+}
+
 // maxPressureRetries bounds in-job retries after a shared-context overflow.
 // They run inside the job, so they never use up an attempt or count against
 // River's snooze total (which queue waits also raise).
@@ -522,6 +553,21 @@ func (w *Worker) complete(ctx context.Context, t *task, role Role, out string, l
 		ev.Endpoint, ev.Model = lease.Endpoint.URL, lease.Model
 	} else {
 		ev.Model = "merge:" + t.set.MergeMode() // merged in code, no model call
+	}
+	// A model-written final answer is checked against the reference (code
+	// merges only combine per-item outputs, so they are left as they are).
+	if t.node.ParentID == nil && lease != nil && t.set.CheckAnswer && strings.TrimSpace(t.set.Context) != "" && strings.TrimSpace(out) != "" {
+		checked, err := w.checkAnswer(ctx, t, role, out)
+		switch {
+		case err == nil:
+			out, ev.Checked = checked, true
+		case ctx.Err() != nil:
+			return err
+		default:
+			w.log.Warn("rules check failed; keeping the unchecked answer", "node", t.node.ID, "err", err)
+			ev.CheckError = err.Error()
+			out += "\n\n---\n_The rules check against the reference could not run (" + err.Error() + "), so this answer is unchecked._"
+		}
 	}
 	var res *store.FinishResult
 	err := w.commit(ctx, t.job, func(tx pgx.Tx, client *river.Client[pgx.Tx]) error {

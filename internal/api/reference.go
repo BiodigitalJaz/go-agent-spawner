@@ -8,14 +8,10 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/BiodigitalJaz/go-agent-spawner/internal/agent"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/fetch"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/settings"
 )
-
-// maxContextChars caps reference material. Every agent receives it, so it
-// competes with each request's own input for the model's (often shared)
-// context: about 8k tokens at a conservative 3 characters per token.
-const maxContextChars = 24_000
 
 var urlRE = regexp.MustCompile(`https?://[^\s<>"'(){}\[\]]+`)
 
@@ -51,11 +47,13 @@ func (e *requestError) Error() string { return e.msg }
 // and, when fetch_urls is on, the pages its prompt links to. A prompt that
 // links to pages it neither supplies nor fetches is refused: agents cannot
 // browse, so they would describe pages they never saw.
-func (s *Server) reference(ctx context.Context, req *createRequest, set settings.Settings, remote string) (string, []fetchedPage, error) {
+// reference caps the material at maxChars: every agent receives it, so it
+// competes with each request's own input for the model's context.
+func (s *Server) reference(ctx context.Context, req *createRequest, set settings.Settings, remote string, maxChars int) (string, []fetchedPage, error) {
 	userCtx := strings.TrimSpace(req.Context)
-	if len(userCtx) > maxContextChars {
+	if len(userCtx) > maxChars {
 		return "", nil, &requestError{http.StatusBadRequest, fmt.Sprintf(
-			"context is %d characters; the limit is %d because every agent receives it. Send large material as document or parts", len(userCtx), maxContextChars)}
+			"context is %d characters; the limit for this model is %d (40%% of its context) because every agent receives it. Send large material as document or parts", len(userCtx), maxChars)}
 	}
 	urls := promptURLs(req.Prompt)
 	if len(urls) == 0 {
@@ -89,8 +87,14 @@ func (s *Server) reference(ctx context.Context, req *createRequest, set settings
 		pages[i] = p
 	}
 	// Share what room is left after the caller's own context between pages.
-	room := (maxContextChars - len(userCtx)) / len(pages)
+	// With both present, label their roles: the pages are what the task is
+	// about, the supplied text is what the answer must respect (without the
+	// labels, models reviewed the guidelines instead of the page).
+	room := (maxChars - len(userCtx) - 200) / len(pages)
 	var b strings.Builder
+	if userCtx != "" {
+		b.WriteString("=== MATERIAL UNDER REVIEW (fetched from the links in the task) ===\n\n")
+	}
 	report := make([]fetchedPage, len(pages))
 	for i, p := range pages {
 		text, cut := p.Text, false
@@ -109,7 +113,41 @@ func (s *Server) reference(ctx context.Context, req *createRequest, set settings
 		report[i] = fetchedPage{URL: p.URL, Title: p.Title, Chars: len(text), Truncated: cut}
 	}
 	if userCtx != "" {
+		b.WriteString("=== GUIDELINES AND FACTS TO RESPECT (supplied with the task) ===\n\n")
 		b.WriteString(userCtx)
 	}
 	return strings.TrimSpace(b.String()), report, nil
+}
+
+// fitToModel makes sure each agent's request fits the worker model's
+// context on its own: the reference goes to every agent, so a document gets
+// more chunks and large parts more sections when the reference is large. It
+// returns a note when it changed the split, and an error when the reference
+// leaves no room at all.
+func fitToModel(req *createRequest, contextTokens, reserveOutput int, reference string) (string, error) {
+	budget := agent.PartBudget(contextTokens, reserveOutput, len(reference), len(req.Prompt))
+	if budget < agent.MinPartBudget {
+		return "", fmt.Errorf("the reference material (%d characters) and prompt leave no room in the worker model's context for the agents' own input; shorten the reference or use a model with a larger context", len(reference))
+	}
+	switch {
+	case len(req.Parts) > 0:
+		want := req.MaxPartTokens
+		if want == 0 {
+			want = agent.DefaultMaxPartTokens
+		}
+		if want > 0 && want > budget {
+			req.MaxPartTokens = budget
+			return fmt.Sprintf("parts larger than %d tokens are split so each agent fits the model's context alongside the reference", budget), nil
+		}
+	case req.Document != "":
+		need := (len(req.Document)/3 + budget - 1) / budget
+		if need > 64 {
+			return "", fmt.Errorf("the document needs %d chunks to fit the model's context alongside the reference; the limit is 64", need)
+		}
+		if need > max(req.Chunks, 1) {
+			req.Chunks = need
+			return fmt.Sprintf("document split into %d chunks so each agent fits the model's context alongside the reference", need), nil
+		}
+	}
+	return "", nil
 }

@@ -97,6 +97,9 @@ type createRequest struct {
 	// FetchURLs downloads the web pages the prompt links to and adds their
 	// text to the context. Without it (or content), a linked page is refused.
 	FetchURLs bool `json:"fetch_urls,omitempty"`
+	// Check overrides the check_answer setting for this run: a rules check
+	// of the final answer against the reference material.
+	Check *bool `json:"check,omitempty"`
 }
 
 func (s *Server) createTree(w http.ResponseWriter, r *http.Request) {
@@ -153,7 +156,11 @@ func (s *Server) createTree(w http.ResponseWriter, r *http.Request) {
 	if req.Priority == 0 {
 		req.Priority = 1
 	}
-	reference, fetched, err := s.reference(r.Context(), &req, set, r.RemoteAddr)
+	ctxLen := 0
+	if m, ok := s.registry.Get(set.Worker.Model); ok {
+		ctxLen = m.ContextLength
+	}
+	reference, fetched, err := s.reference(r.Context(), &req, set, r.RemoteAddr, agent.MaxReferenceChars(ctxLen))
 	if err != nil {
 		var re *requestError
 		if errors.As(err, &re) {
@@ -162,6 +169,14 @@ func (s *Server) createTree(w http.ResponseWriter, r *http.Request) {
 		}
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	sizing, err := fitToModel(&req, ctxLen, set.Worker.MaxTokens, reference)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.Check != nil {
+		set.CheckAnswer = *req.Check
 	}
 
 	started, err := agent.StartTree(r.Context(), s.db, s.river, agent.TreeRequest{
@@ -192,6 +207,9 @@ func (s *Server) createTree(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"tree_id":    root.TreeID,
 		"events_url": fmt.Sprintf("/v1/trees/%s/events", root.TreeID),
+	}
+	if sizing != "" {
+		resp["sizing"] = sizing
 	}
 	if len(fetched) > 0 {
 		resp["fetched"] = fetched

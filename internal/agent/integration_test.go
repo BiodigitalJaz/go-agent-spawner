@@ -93,6 +93,8 @@ func (f *fakeLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case f.failPrompt != "" && strings.Contains(user, f.failPrompt):
 		http.Error(w, `{"error":"context length exceeded"}`, http.StatusBadRequest)
 		return
+	case strings.Contains(system, "You check an answer against reference material"):
+		content = "CHECKED " + fmt.Sprint(strings.Contains(user, "--- BEGIN REFERENCE ---")) + "\n### Rules check\nNo conflicts with the reference found."
 	case strings.Contains(user, "Partial results to consolidate"):
 		content = "CONSOLIDATED " + fmt.Sprint(strings.Count(user, "### ")) + " results"
 	case strings.Contains(user, "Results from parallel workers"):
@@ -661,10 +663,14 @@ func TestContextReachesEveryAgent(t *testing.T) {
 	}
 	llm.mu.Lock()
 	defer llm.mu.Unlock()
-	var plan, workers, merge int
+	var plan, workers, merge, check int
 	for _, p := range llm.prompts {
 		has := strings.Contains(p, "--- BEGIN REFERENCE ---\nPAGE: We do not claim it makes money.\n--- END REFERENCE ---")
 		switch {
+		case strings.Contains(p, "Answer to check:"): // rules check of the final answer
+			if has {
+				check++
+			}
 		case strings.Contains(p, "SPLIT: review this page") && !strings.Contains(p, "Results from parallel workers"):
 			if has {
 				plan++
@@ -679,12 +685,58 @@ func TestContextReachesEveryAgent(t *testing.T) {
 			}
 		}
 	}
-	if plan != 1 || workers != 2 || merge != 1 {
-		t.Fatalf("reference missing: planner %d/1, workers %d/2, merge %d/1", plan, workers, merge)
+	if plan != 1 || workers != 2 || merge != 1 || check != 1 {
+		t.Fatalf("reference missing: planner %d/1, workers %d/2, merge %d/1, check %d/1", plan, workers, merge, check)
 	}
 	snap, err := settings.ForTree(context.Background(), h.db, started.Root.TreeID)
 	if err != nil || snap.Context != "PAGE: We do not claim it makes money." {
 		t.Fatalf("context not stored with the tree: %+v %v", snap, err)
+	}
+}
+
+func TestRulesCheckOfFinalAnswer(t *testing.T) {
+	cases := []struct {
+		name      string
+		prompt    string
+		merge     string
+		check     bool
+		wantCheck bool
+	}{
+		{"direct answer", "answer directly", "", true, true},
+		{"llm merge", "SPLIT: review", settings.MergeLLM, true, true},
+		{"setting off", "answer directly", "", false, false},
+		{"code merge", "SPLIT: review", settings.MergeList, true, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := setup(t, &fakeLLM{split: []string{"one", "two"}})
+			set := h.set
+			set.Merge, set.CheckAnswer = c.merge, c.check
+			started, err := agent.StartTree(context.Background(), h.db, h.client, agent.TreeRequest{
+				Prompt: c.prompt, Priority: 1, Settings: set, Context: "RULE: no testimonials",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			evs := h.collect(t, started.Root.TreeID)
+			last := evs[len(evs)-1]
+			if last.Type != events.TreeDone {
+				t.Fatalf("tree failed: %+v", last)
+			}
+			checked := strings.HasPrefix(last.Text, "CHECKED true\n### Rules check")
+			if checked != c.wantCheck {
+				t.Fatalf("checked = %v, want %v; final: %q", checked, c.wantCheck, last.Text)
+			}
+			var stats *events.Stats
+			for _, e := range evs {
+				if e.Type == events.NodeDone && e.NodeID == started.Root.ID {
+					stats = e.Stats
+				}
+			}
+			if stats == nil || stats.Checked != c.wantCheck {
+				t.Fatalf("root stats.checked = %+v, want %v", stats, c.wantCheck)
+			}
+		})
 	}
 }
 

@@ -40,6 +40,11 @@ type Settings struct {
 	// link-local and cluster addresses. Off by default; every attempt on
 	// such an address is logged either way.
 	AllowInternalFetch bool `json:"allow_internal_fetch,omitempty"`
+	// CheckAnswer runs a rules check on a model-written final answer when
+	// the tree has reference material: conflicting recommendations are
+	// removed or fixed, and the changes are listed. On by default (no
+	// omitempty, so a saved false is kept).
+	CheckAnswer bool `json:"check_answer"`
 
 	// Context is a tree's reference material, sent to every agent. It is
 	// stored with the tree (agent_tree.context), not in the settings JSON.
@@ -74,7 +79,7 @@ Agents cannot browse the web or open files: they see only the task and any refer
 
 Work only from the task text and any reference material provided with it; you cannot browse the web or open files. If the task needs content you were not given (a web page, a file, a document), say so in one line, naming what is missing, and stop. Never guess or describe content you have not seen.`
 
-	DefaultReducerDirective = `You synthesize results from parallel worker agents into one complete answer to the original task. Resolve overlaps, and note any gaps left by failed subtasks. Respond with the final answer only.
+	DefaultReducerDirective = `You synthesize results from parallel worker agents into one complete answer to the original task. Resolve overlaps, and note any gaps left by failed subtasks. Respond with the final answer only: write the answer itself, never a description of the workers, their agreement or this process.
 
 If the results contradict each other on basic facts (for example, they describe different subjects), or report that required content was missing, do not combine them: say what is missing or contradictory, in a few lines, and stop. When reference material is provided, recommendations must not conflict with it.`
 )
@@ -87,6 +92,7 @@ func Defaults(plannerModel, workerModel string, maxDepth, maxChildren int) Setti
 		Reducer:     Role{Model: workerModel, Temperature: ptr(0.3), Directive: DefaultReducerDirective},
 		MaxDepth:    maxDepth,
 		MaxChildren: maxChildren,
+		CheckAnswer: true,
 	}
 }
 
