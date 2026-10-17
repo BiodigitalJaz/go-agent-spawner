@@ -2,6 +2,8 @@
 // and per-node DOM that is updated in place so streaming text never resets
 // scroll position or expanded state.
 
+import { renderMarkdown } from "./markdown.js";
+
 // ---------- helpers ----------
 const $ = (sel, root = document) => root.querySelector(sel);
 
@@ -550,10 +552,20 @@ function treeView(root, id) {
     if (key === finalKey) return;
     finalKey = key;
     if (t.final != null) {
+      // Results are Markdown from the models: rendered by default (as DOM,
+      // never as HTML), with the raw text one click away. Copy copies raw.
+      const out = h("div", { class: "out md" }, renderMarkdown(t.final));
+      let raw = false;
+      const toggle = h("button", { class: "btn small", title: "Show the raw Markdown", onclick: () => {
+        raw = !raw;
+        out.classList.toggle("md", !raw);
+        out.replaceChildren(raw ? document.createTextNode(t.final) : renderMarkdown(t.final));
+        toggle.textContent = raw ? "Rendered" : "Raw";
+      } }, "Raw");
       const copy = h("button", { class: "btn small", onclick: () => navigator.clipboard?.writeText(t.final).then(() => toast("Copied")) }, "Copy");
       finalBlock.replaceChildren(
-        h("h3", { class: "section-title" }, "Result", copy),
-        h("div", { class: "panel final" }, h("div", { class: "out" }, t.final)));
+        h("h3", { class: "section-title" }, "Result", h("span", { class: "title-actions" }, toggle, copy)),
+        h("div", { class: "panel final" }, out));
     } else if (t.finalError) {
       finalBlock.replaceChildren(h("h3", { class: "section-title" }, "Result"), h("div", { class: "out err" }, t.finalError));
     } else {
@@ -659,9 +671,11 @@ function treeView(root, id) {
 
   // Step chart of how many agents were generating (not queued or waiting).
   function renderConcurrency(list, t0, span, now) {
+    if (!Number.isFinite(t0) || !(span > 0)) return;
     const pts = [];
     for (const n of list) for (const s of segments(n, now)) {
-      if (s.cls === "plan" || s.cls === "exec" || s.cls === "reduce") { pts.push([s.a, 1], [s.b, -1]); }
+      // A segment can lack a timestamp while events are still arriving.
+      if ((s.cls === "plan" || s.cls === "exec" || s.cls === "reduce") && Number.isFinite(s.a) && Number.isFinite(s.b)) { pts.push([s.a, 1], [s.b, -1]); }
     }
     pts.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
     let cur = 0, peak = 1;
@@ -801,10 +815,24 @@ function treeView(root, id) {
 
       // Root output duplicates the Result panel once done; show it only while streaming.
       const text = isRoot && n.status === "done" ? "" : n.text;
-      if (text.length !== c.lastText) {
-        streamInto(r.out, text, c.lastText);
-        c.lastText = text.length;
-        if (c.stickOut) follow.push(r.out);
+      if (n.status === "done" && text) {
+        // Finished output is rendered as Markdown; streaming stays plain text.
+        once(m, "outMd", text, () => {
+          r.out.replaceChildren(renderMarkdown(text));
+          r.out.classList.add("md");
+          c.lastText = text.length;
+        });
+      } else {
+        if (m.outMd !== undefined) { // restarted after being rendered
+          m.outMd = undefined;
+          r.out.classList.remove("md");
+          c.lastText = -1;
+        }
+        if (text.length !== c.lastText) {
+          streamInto(r.out, text, c.lastText);
+          c.lastText = text.length;
+          if (c.stickOut) follow.push(r.out);
+        }
       }
       once(m, "err", n.error, () => { r.err.textContent = n.error; });
       once(m, "foot", text.length > 400, () => { r.foot.style.display = text.length > 400 ? "" : "none"; });

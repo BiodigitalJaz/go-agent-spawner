@@ -1,0 +1,5 @@
+{
+  "private": true,
+  "type": "module",
+  "description": "Marks the console's JavaScript as ES modules for Node's test runner (not shipped)."
+}
