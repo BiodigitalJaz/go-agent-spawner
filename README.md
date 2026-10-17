@@ -80,7 +80,7 @@ Before a reducer merges its children, it estimates the input size from each chil
 
 ```sh
 cp backends.example.json backends.local.json   # point at your LM Studio
-make deps                                       # postgres, nats, river UI on :8081
+make deps                                       # postgres and nats
 DATABASE_URL=postgres://postgres:dev@localhost:5432/spawner?sslmode=disable \
 BACKENDS_FILE=backends.local.json go run ./cmd/spawner migrate
 DATABASE_URL=postgres://postgres:dev@localhost:5432/spawner?sslmode=disable \
