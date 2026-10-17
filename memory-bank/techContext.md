@@ -11,7 +11,6 @@
 | golang.org/x/sync | errgroup in main | |
 | Postgres | 17 used in tests; cluster version unknown | |
 | NATS server | 2.11-alpine (`-js`) | |
-| River UI | ghcr.io/riverqueue/riverui:v0.21.0 | |
 
 No Prometheus, client-go or YAML dependencies by design. Discovery is DNS-based, so it needs no RBAC, and config is JSON.
 
@@ -43,7 +42,7 @@ memory-bank/                 this documentation
 
 ## Dev setup
 ```sh
-make deps              # docker compose: postgres:5432 (pw dev, db spawner), nats:4222, riverui:8081
+make deps              # docker compose: postgres:5432 (pw dev, db spawner), nats:4222
 make test              # unit tests (integration tests skip without env)
 make test-integration  # sets TEST_DATABASE_URL / TEST_NATS_URL
 make run               # migrate + `spawner all`

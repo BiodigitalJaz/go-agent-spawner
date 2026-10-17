@@ -10,9 +10,3 @@ services:
     image: nats:2.11-alpine
     command: ["-js"]
     ports: ["4222:4222"]
-  riverui:
-    image: ghcr.io/riverqueue/riverui:0.21.0
-    environment:
-      DATABASE_URL: postgres://postgres:dev@postgres:5432/spawner?sslmode=disable
-    ports: ["8081:8080"]
-    depends_on: [postgres]

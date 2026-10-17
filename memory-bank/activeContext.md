@@ -6,7 +6,9 @@ _Last updated: 2026-10-12_
 **Deployed and live** on the user's cluster: namespace `agent-spawner`, console at http://192.168.1.64:30880 (NodePort 30880 on any node). See deployment.md for every detail. Next steps depend on the user.
 
 ## Recent changes
-### 2026-10-17: Markdown rendering in the console (0.1.22, branch `feat/render-markdown`)
+### 2026-10-17: River UI removed from the stack (branch `chore/remove-riverui`)
+- It was an unused, unauthenticated job inspector holding the spawner's full DB credentials and Postgres connections. Removed from the base kustomization, docker-compose and README; deleted the running Deployment and Service from `agent-spawner` (kubectl apply does not prune). The River Go library (the queue) stays. For job-level debugging, query `river_job` or run riverui temporarily against DATABASE_URL.
+### 2026-10-17: Markdown rendering in the console (0.1.22, merged via PR #7; user confirmed after a page reload; open tabs keep old JS until reloaded)
 - `internal/ui/static/markdown.js`: own renderer, no dependency. Parses to a tree and builds DOM (never HTML strings): raw HTML stays text; links only http(s)/mailto (one level of parentheses allowed in targets); images become links (nothing fetched); single newlines kept as line breaks (list/concat merges are one item per line). Supports headings, emphasis, strikethrough, inline/fenced code, nested lists, quotes, tables with alignment, rules, backslash escapes.
 - Result panel renders Markdown with a Raw/Rendered toggle (Copy copies raw). Agent cards stream plain text and switch to rendered when the node is done (reset if it restarts).
 - Tests: `node --test internal/ui/markdown.test.js` (fake DOM, escaped serialization; `internal/ui/package.json` marks ES modules for Node, not embedded). CI runs it.

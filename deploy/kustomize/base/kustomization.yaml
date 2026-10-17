@@ -9,7 +9,6 @@ resources:
   - nats.yaml
   - api.yaml
   - worker.yaml
-  - riverui.yaml
 configMapGenerator:
   - name: spawner-backends
     files:

@@ -22,7 +22,7 @@ Local LLMs on a few GPUs are slow and a scarce resource. Sending one big prompt 
 2. Client opens `GET /v1/trees/{id}/events` (SSE) and watches the tree: `node.started` → `thinking` → `node.split` (children listed) → children stream in parallel → `node.done` with stats → the reduce step streams → `tree.done` with the final text.
 3. `GET /v1/trees/{id}` returns every node with its outputs, and `DELETE` cancels the tree, stopping running generations.
 4. **Web console** (`/`): the Runs page shows the live timeline, agent cards with streaming output and reasoning, and the result. The Agents & directives page edits role models, params and directives. The Models & capacity page shows live slot gauges per worker and endpoint.
-5. Operators can also use `/debug/backends` per worker, and River UI for the jobs.
+5. Operators can also use `/debug/backends` per worker; job-level debugging is done by querying `river_job` in Postgres (River UI was removed 2026-10-17).
 
 ## UX goals
 - Show the first sign of life in under a second, even when the model is thinking.
