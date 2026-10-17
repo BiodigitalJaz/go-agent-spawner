@@ -33,6 +33,9 @@ type TreeRequest struct {
 	// MaxPartTokens splits given parts larger than this into sections, one
 	// agent each. 0 means DefaultMaxPartTokens; negative disables splitting.
 	MaxPartTokens int
+	// Context is reference material sent to every agent in the tree (a
+	// fetched page, rules to respect). Stored once with the tree.
+	Context string
 	// PartMaxWords, when > 0, asks each part's agent for an answer under
 	// that many words. The merge still gets the unchanged prompt, so the
 	// final answer keeps its length. Per-part work is output-bound, so short
@@ -101,6 +104,7 @@ func partPrompt(instruction string, p Part, i, n int) string {
 // parts); the root waits for them and its reduce merges the results.
 func startChunked(ctx context.Context, db *pgxpool.Pool, client *river.Client[pgx.Tx], req TreeRequest) (*StartedTree, error) {
 	set := req.Settings
+	set.Context = req.Context
 	id := uuid.New()
 	parts := req.Parts
 	root := &store.Node{ID: id, TreeID: id, Prompt: req.Prompt, Model: set.Worker.Model, Role: string(RolePlan), Status: store.StatusQueued}
@@ -153,6 +157,7 @@ func startChunked(ctx context.Context, db *pgxpool.Pool, client *river.Client[pg
 
 func startPlanned(ctx context.Context, db *pgxpool.Pool, client *river.Client[pgx.Tx], req TreeRequest) (*store.Node, error) {
 	set := req.Settings
+	set.Context = req.Context
 	id := uuid.New()
 	args := TaskArgs{TreeID: id, NodeID: id, Role: RolePlan, Model: set.Planner.Model, Priority: req.Priority}
 	if set.MaxDepth == 0 {

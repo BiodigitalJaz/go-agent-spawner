@@ -36,6 +36,14 @@ type Settings struct {
 	// (union of lines without duplicates, for list-shaped answers). The code
 	// merges need no model call, so they add no latency.
 	Merge string `json:"merge,omitempty"`
+	// AllowInternalFetch lets URL fetching reach private, loopback,
+	// link-local and cluster addresses. Off by default; every attempt on
+	// such an address is logged either way.
+	AllowInternalFetch bool `json:"allow_internal_fetch,omitempty"`
+
+	// Context is a tree's reference material, sent to every agent. It is
+	// stored with the tree (agent_tree.context), not in the settings JSON.
+	Context string `json:"-"`
 }
 
 const (
@@ -58,11 +66,17 @@ Decide whether the task should be answered directly by one agent ("direct") or s
 
 Split only when:
 - the subtasks are genuinely independent and can run at the same time, and
-- the task is large enough that parallel work beats one focused answer.`
+- the task is large enough that parallel work beats one focused answer.
 
-	DefaultWorkerDirective = "You are a worker agent. Complete the task thoroughly and accurately. Respond with the result only."
+Agents cannot browse the web or open files: they see only the task and any reference material provided with it. Do not split a task that depends on content that was not provided (a web page, a file, a document); answer "direct" so the missing content is reported.`
 
-	DefaultReducerDirective = "You synthesize results from parallel worker agents into one complete answer to the original task. Resolve overlaps and contradictions, and note any gaps left by failed subtasks. Respond with the final answer only."
+	DefaultWorkerDirective = `You are a worker agent. Complete the task thoroughly and accurately. Respond with the result only.
+
+Work only from the task text and any reference material provided with it; you cannot browse the web or open files. If the task needs content you were not given (a web page, a file, a document), say so in one line, naming what is missing, and stop. Never guess or describe content you have not seen.`
+
+	DefaultReducerDirective = `You synthesize results from parallel worker agents into one complete answer to the original task. Resolve overlaps, and note any gaps left by failed subtasks. Respond with the final answer only.
+
+If the results contradict each other on basic facts (for example, they describe different subjects), or report that required content was missing, do not combine them: say what is missing or contradictory, in a few lines, and stop. When reference material is provided, recommendations must not conflict with it.`
 )
 
 // Defaults builds the settings used until someone saves from the UI.
@@ -172,14 +186,17 @@ func SnapshotTree(ctx context.Context, db store.DBTX, treeID uuid.UUID, prompt s
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(ctx, `INSERT INTO agent_tree (id, prompt, config) VALUES ($1, $2, $3)`, treeID, prompt, raw)
+	_, err = db.Exec(ctx, `INSERT INTO agent_tree (id, prompt, config, context) VALUES ($1, $2, $3, $4)`, treeID, prompt, raw, s.Context)
 	return err
 }
 
 // ForTree loads a tree's snapshot.
 func ForTree(ctx context.Context, db store.DBTX, treeID uuid.UUID) (*Settings, error) {
-	var raw []byte
-	err := db.QueryRow(ctx, `SELECT config FROM agent_tree WHERE id = $1`, treeID).Scan(&raw)
+	var (
+		raw       []byte
+		reference string
+	)
+	err := db.QueryRow(ctx, `SELECT config, context FROM agent_tree WHERE id = $1`, treeID).Scan(&raw, &reference)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
@@ -190,5 +207,6 @@ func ForTree(ctx context.Context, db store.DBTX, treeID uuid.UUID) (*Settings, e
 	if err := json.Unmarshal(raw, &s); err != nil {
 		return nil, fmt.Errorf("decode tree settings: %w", err)
 	}
+	s.Context = reference
 	return &s, nil
 }

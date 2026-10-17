@@ -10,6 +10,7 @@ require (
 	github.com/riverqueue/river v0.49.0
 	github.com/riverqueue/river/riverdriver/riverpgxv5 v0.49.0
 	github.com/riverqueue/river/rivertype v0.49.0
+	golang.org/x/net v0.60.0
 	golang.org/x/sync v0.23.0
 )
 

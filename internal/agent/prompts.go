@@ -65,17 +65,31 @@ func planRules(maxChildren int, canNest bool) string {
 When the strategy is "direct", return an empty subtasks array.`, maxChildren, nest)
 }
 
+// withReference puts a tree's reference material before the task. Every
+// agent (planner, workers, merge) receives it, so subtasks can rely on it.
+func withReference(set *settings.Settings, task string) string {
+	if strings.TrimSpace(set.Context) == "" {
+		return task
+	}
+	return "Reference material provided with this task (your only source for its content):\n" +
+		"--- BEGIN REFERENCE ---\n" + set.Context + "\n--- END REFERENCE ---\n\n" + task
+}
+
 func planMessages(set *settings.Settings, node *store.Node, canNest bool) []llm.Message {
+	rules := planRules(set.MaxChildren, canNest)
+	if strings.TrimSpace(set.Context) != "" {
+		rules += "\n\nEvery worker also receives the reference material below, so subtask prompts may refer to it."
+	}
 	return []llm.Message{
-		{Role: "system", Content: strings.TrimSpace(set.Planner.Directive) + "\n\n" + planRules(set.MaxChildren, canNest)},
-		{Role: "user", Content: node.Prompt},
+		{Role: "system", Content: strings.TrimSpace(set.Planner.Directive) + "\n\n" + rules},
+		{Role: "user", Content: withReference(set, node.Prompt)},
 	}
 }
 
 func execMessages(set *settings.Settings, node *store.Node) []llm.Message {
 	return []llm.Message{
 		{Role: "system", Content: set.Worker.Directive},
-		{Role: "user", Content: node.Prompt},
+		{Role: "user", Content: withReference(set, node.Prompt)},
 	}
 }
 
@@ -109,7 +123,7 @@ func childItems(children []*store.Node) []mergeItem {
 func reduceMessages(set *settings.Settings, node *store.Node, items []mergeItem) []llm.Message {
 	return []llm.Message{
 		{Role: "system", Content: set.Reducer.Directive},
-		{Role: "user", Content: fmt.Sprintf("Original task:\n%s\n\nResults from parallel workers:\n%s", node.Prompt, itemsBlock(items))},
+		{Role: "user", Content: withReference(set, fmt.Sprintf("Original task:\n%s\n\nResults from parallel workers:\n%s", node.Prompt, itemsBlock(items)))},
 	}
 }
 

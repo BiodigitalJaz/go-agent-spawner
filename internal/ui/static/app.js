@@ -309,10 +309,20 @@ function buildComposer() {
   const chunks = h("input", { type: "number", min: 1, max: 64, value: 4, "aria-label": "Chunks", title: "1 = whole document in one agent's context; more = split in code across parallel agents" });
   const docInfo = h("span", { class: "faint" });
   doc.addEventListener("input", () => setText(docInfo, doc.value ? `≈${Math.round(doc.value.length / 4).toLocaleString()} tokens` : ""));
+  const reference = h("textarea", { class: "mono doc", placeholder: "Reference material every agent sees: a page's text, rules the answer must respect (e.g. a brand guide's don'ts).", "aria-label": "Reference" });
+  const refInfo = h("span", { class: "faint" });
+  reference.addEventListener("input", () => setText(refInfo, reference.value ? `${reference.value.length.toLocaleString()} / 24,000 characters` : ""));
   const docBox = h("details", { class: "docbox" },
-    h("summary", {}, "Document (optional)"),
+    h("summary", {}, "Document & reference (optional)"),
+    h("div", { class: "doc-label" }, "Document ", h("span", { class: "faint" }, "split across agents")),
     doc,
-    h("div", { class: "doc-opts" }, h("label", {}, "Chunks ", chunks), docInfo));
+    h("div", { class: "doc-opts" }, h("label", {}, "Chunks ", chunks), docInfo),
+    h("div", { class: "doc-label" }, "Reference ", h("span", { class: "faint" }, "shared with every agent")),
+    reference,
+    h("div", { class: "doc-opts" }, refInfo));
+  // Agents cannot browse; linked pages are fetched into the reference.
+  const fetchUrls = h("input", { type: "checkbox", checked: true, "aria-label": "Fetch linked pages" });
+  const fetchLabel = h("label", { class: "check", title: "Download the web pages linked in the prompt and give their text to every agent. Agents cannot open links themselves." }, fetchUrls, " Fetch linked pages");
 
   function refreshModels() {
     const s = app.settings?.settings;
@@ -336,12 +346,17 @@ function buildComposer() {
     if (children.value !== "") body.max_children = Number(children.value);
     if (doc.value.trim()) { body.document = doc.value; body.chunks = Number(chunks.value) || 1; }
     if (merge.value) body.merge = merge.value;
+    if (reference.value.trim()) body.context = reference.value;
+    body.fetch_urls = fetchUrls.checked;
     run.disabled = true;
     try {
       const res = await api("POST", "/v1/trees", body);
       prompt.value = "";
       doc.value = "";
+      reference.value = "";
       setText(docInfo, "");
+      setText(refInfo, "");
+      if (res.fetched?.length) toast(`Fetched ${res.fetched.map((p) => p.title || p.url).join(", ")}${res.fetched.some((p) => p.truncated) ? " (truncated to fit)" : ""}`);
       location.hash = `#/runs/${res.tree_id}`;
       scheduleTreeRefresh(50);
     } catch (e) {
@@ -360,6 +375,7 @@ function buildComposer() {
     h("div", { class: "opts" }, model, depth, children, priority, merge),
     docBox,
     h("div", { class: "actions" },
+      fetchLabel,
       h("span", { class: "faint", style: "font-size:12px" }, "Overrides apply to this run only"),
       run));
   return { el, refreshModels };
@@ -403,6 +419,7 @@ function treeView(root, id) {
     t.status = d.status;
     t.created = ms(d.created_at);
     t.settings = d.settings;
+    t.context = d.context || "";
     for (const r of d.nodes) {
       const n = node(r.id);
       Object.assign(n, {
@@ -494,10 +511,19 @@ function treeView(root, id) {
   const graph = h("div", { class: "graph" });
   const cards = new Map(); // node id -> {wrap, card, refs}
 
+  // Reference material the agents were given: collapsed, filled on open, so a
+  // long page never sits in the DOM uninvited.
+  const refBlock = h("details", { class: "refbox" });
+  refBlock.addEventListener("toggle", () => {
+    if (refBlock.open && !refBlock.querySelector("pre")) refBlock.append(h("pre", { class: "mono" }, t.context));
+  });
+
   function buildLayout() {
+    if (t.context) refBlock.append(h("summary", {}, `Reference material given to every agent (${t.context.length.toLocaleString()} characters)`));
     root.replaceChildren(
       head,
       chips,
+      ...(t.context ? [refBlock] : []),
       finalBlock,
       h("div", { class: "block" },
         h("h3", { class: "section-title" }, "Timeline", h("span", { class: "hint" }, "who ran when, and how many in parallel")),
@@ -524,7 +550,8 @@ function treeView(root, id) {
   const headPill = h("span");
   const headElapsed = h("span", { class: "elapsed" });
   const cancelBtn = h("button", { class: "btn small danger", onclick: cancelTree }, "Cancel run");
-  head.append(headPrompt, h("div", { class: "side" }, headPill, headElapsed, cancelBtn));
+  const deleteBtn = h("button", { class: "btn small danger", onclick: deleteTree, title: "Delete this run and every record of it" }, "Delete");
+  head.append(headPrompt, h("div", { class: "side" }, headPill, headElapsed, cancelBtn, deleteBtn));
 
   function renderHead() {
     const live = !TERMINAL.has(t.status);
@@ -533,6 +560,7 @@ function treeView(root, id) {
     setPill(headPill, t.status, live);
     setText(headElapsed, fmtDur(end - t.created));
     cancelBtn.hidden = !live;
+    if (!deleteBtn.disabled) setText(deleteBtn, live ? "Cancel & delete" : "Delete");
 
     const counts = {};
     for (const n of nodes.values()) counts[n.status] = (counts[n.status] || 0) + 1;
@@ -864,6 +892,39 @@ function treeView(root, id) {
     }
   }
 
+  // deleteTree removes every record of the run (prompt, agent outputs,
+  // reference material, queue jobs, live events). An active run is cancelled
+  // first; the purge is retried while its agents finish stopping.
+  async function deleteTree() {
+    const live = !TERMINAL.has(t.status);
+    const what = "its prompt, every agent's output, the reference material and its events";
+    if (deleteBtn.disabled || !confirm(live
+      ? `Cancel this run and delete it with ${what}? This cannot be undone.`
+      : `Delete this run with ${what}? This cannot be undone.`)) return;
+    deleteBtn.disabled = true;
+    setText(deleteBtn, "Deleting…");
+    try {
+      if (live) await api("DELETE", `/v1/trees/${id}`);
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await api("DELETE", `/v1/trees/${id}?purge=1`);
+          break;
+        } catch (e) {
+          if (e.status !== 409 || attempt >= 20) throw e;
+          await new Promise((r) => setTimeout(r, 1000)); // agents still stopping
+        }
+      }
+      toast("Run deleted");
+      app.trees = app.trees.filter((x) => x.id !== id);
+      location.hash = "#/runs";
+      scheduleTreeRefresh(50);
+    } catch (e) {
+      toast(e.message, true);
+      deleteBtn.disabled = false;
+      setText(deleteBtn, live ? "Cancel & delete" : "Delete");
+    }
+  }
+
   function render() {
     if (destroyed) return;
     renderHead();
@@ -1006,6 +1067,11 @@ function settingsView(root) {
             sel.value = form.merge || "";
             return sel;
           })()),
+        h("label", { class: "field check-field" },
+          h("span", {}, h("input", { type: "checkbox", checked: !!form.allow_internal_fetch,
+            onchange: (e) => { if (e.target.checked) form.allow_internal_fetch = true; else delete form.allow_internal_fetch; updateBar(); } }),
+            " Allow fetching internal network addresses"),
+          h("span", { class: "note" }, "Off by default. When on, “Fetch linked pages” may reach private, loopback, link-local and cluster addresses (internal wikis, dashboards, services). Every attempt on an internal address is logged by the API, allowed or blocked.")),
         h("div", { class: "explain" },
           h("b", {}, "Merge:"), " LLM writes a combined answer (any task, +1 model call). ",
           h("b", {}, "List"), " and ", h("b", {}, "concat"), " combine results in code with no model call — for list-shaped or independent outputs. ",
