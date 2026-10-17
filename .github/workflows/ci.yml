@@ -65,7 +65,10 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Console JavaScript parses
-        run: node --check internal/ui/static/app.js
+        run: |
+          node --check internal/ui/static/app.js
+          node --check internal/ui/static/markdown.js
+          node --test internal/ui/markdown.test.js
 
       - name: Kustomize overlays render
         run: |

@@ -6,7 +6,22 @@ _Last updated: 2026-10-12_
 **Deployed and live** on the user's cluster: namespace `agent-spawner`, console at http://192.168.1.64:30880 (NodePort 30880 on any node). See deployment.md for every detail. Next steps depend on the user.
 
 ## Recent changes
-### 2026-10-13: shared-context overflows on book text (0.1.19, branch `fix/context-admission`)
+### 2026-10-17: Markdown rendering in the console (0.1.22, branch `feat/render-markdown`)
+- `internal/ui/static/markdown.js`: own renderer, no dependency. Parses to a tree and builds DOM (never HTML strings): raw HTML stays text; links only http(s)/mailto (one level of parentheses allowed in targets); images become links (nothing fetched); single newlines kept as line breaks (list/concat merges are one item per line). Supports headings, emphasis, strikethrough, inline/fenced code, nested lists, quotes, tables with alignment, rules, backslash escapes.
+- Result panel renders Markdown with a Raw/Rendered toggle (Copy copies raw). Agent cards stream plain text and switch to rendered when the node is done (reset if it restarts).
+- Tests: `node --test internal/ui/markdown.test.js` (fake DOM, escaped serialization; `internal/ui/package.json` marks ES modules for Node, not embedded). CI runs it.
+- Also fixed: the Parallel agents chart drew `NaN` paths for single-agent runs (segments without timestamps), which logged console errors.
+- Verified on the cluster with Playwright: the book result (15 bold, 16 list items), raw toggle, 78/79 cards rendered, a fresh table run, and hostile input (javascript: link, <img onerror>, <b>) rendered inert; no dialogs, no console errors.
+- The scratchpad (old Playwright suites, fakellm, start-ui.sh) was wiped by a session restart; Playwright 1.55.0 matches the cached chromium-1187.
+### 2026-10-13: LM Studio slowdown fixed by host restart; parallelism benchmark
+- After the user restarted the LM Studio host, no model was loaded; loaded qwen/qwen3.5-9b via /v1/discovery/load at 32k (parallel 8 came from LM Studio's saved settings). Prefill back to ~5,200-5,500 tok/s (was ~530). Book rerun (17 files, 78 agents): 276 s, 0 failures, 4 in-job overflow retries.
+- Concurrency benchmark direct to LM Studio (qwen3.5-9b Q8, 32k shared ctx, 8 slots; scratchpad parbench.py, closed loop):
+  - Decode-heavy (500 in / 512 out): output 54 tok/s at N=1 -> 90 (2) -> 138 (4) -> 170 (6) -> 193 (8) -> flat 191/187 at 12/16 (queueing; latency doubles). Per-stream 55 -> 26 tok/s at 8.
+  - Mixed (2k in / 256 out): 11.5 -> 19.2 -> 27.5 -> 31.9 -> 34.8 req/min at 1/2/4/6/8; flat at 12.
+  - Prefill-heavy (6k in / 32 out): 35 -> 42 -> 43 -> 43 req/min at 1/2/3/4; prefill saturates at ~4k tok/s by N=2. N=6 (36k > 32k context) -> every request overflowed.
+  - Knee: 6-8 for generation-heavy work (8 = slot cap; +14% from 6 to 8); 2 for reading-heavy work. Shared-context rule: N x (prompt + output) <= ~29k, so 8-way needs requests under ~3.5k tokens.
+- End to end, 48 passages x ~3k tokens summarized: direct at 8 concurrent 50.3 s; spawner 58.8 s (17% overhead), avg concurrency 5.7 / peak 8. Cause: admission reserves max_tokens (default 1024) per request though outputs were ~74 tokens. Next: size the output reserve from part_max_words / observed outputs.
+### 2026-10-13: shared-context overflows on book text (0.1.19, merged via PR #6)
 - User's book-title run 2c280373 stalled 22+ min with LM Studio "Context size has been exceeded" (n_tokens ~14.5k per request, 32k context shared by 8 slots).
 - Causes: (1) admission estimated chars/4, but book text measured 3.4 chars/token median, 1.9 worst (25/29 requests above the estimate); (2) the "retry overflow without burning an attempt" path never fired: it shared River's snooze counter (limit 30) with queue-saturation snoozes, which reached 598-715 per job, so every overflow used up an attempt.
 - Fixes: pool learns real/estimated prompt-token ratio per model from response usage (`AcquireRequest`, moving mean + 1 deviation; overflow bumps ×1.25 before any observation, ×1.05 after); overflows are retried inside the job (`generateRetrying`, up to 8, re-admitting with the new ratio), never using an attempt; a repeated `node.started` tells the console to clear the abandoned attempt's partial text (also explains earlier card-text mismatches, unverified); splitting estimates chars/3.

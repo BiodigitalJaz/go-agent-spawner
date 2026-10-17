@@ -385,3 +385,27 @@ details.thinking.live summary .lbl::after { content: "…"; animation: pulse 1.2
 .login-error { color: var(--c-failed); font-size: 13px; min-height: 1em; }
 .login-error:empty { display: none; }
 .signout { font-size: 14px; }
+
+/* Rendered Markdown in results and finished agent outputs. */
+.out.md { white-space: normal; }
+.out.md > :first-child { margin-top: 0; }
+.out.md > :last-child { margin-bottom: 0; }
+.out.md p, .out.md ul, .out.md ol, .out.md pre, .out.md blockquote, .out.md .md-table { margin: 0 0 .7em; }
+.out.md h1, .out.md h2, .out.md h3, .out.md h4, .out.md h5, .out.md h6 { margin: 1em 0 .45em; line-height: 1.3; font-weight: 650; }
+.out.md h1 { font-size: 1.35em; } .out.md h2 { font-size: 1.2em; } .out.md h3 { font-size: 1.08em; }
+.out.md h4, .out.md h5, .out.md h6 { font-size: 1em; }
+.out.md ul, .out.md ol { padding-left: 1.4em; }
+.out.md li { margin: .15em 0; }
+.out.md li > ul, .out.md li > ol { margin: .15em 0 0; }
+.out.md code { font-family: var(--mono); font-size: .92em; background: color-mix(in srgb, var(--muted) 14%, transparent); padding: .08em .35em; border-radius: 4px; }
+.out.md pre { background: var(--panel-2); border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px; overflow-x: auto; }
+.out.md pre code { background: none; padding: 0; font-size: 12.5px; white-space: pre; }
+.final .out.md pre { background: var(--panel-2); }
+.out.md blockquote { border-left: 3px solid var(--border); padding-left: .8em; color: var(--muted); }
+.out.md hr { border: none; border-top: 1px solid var(--border); margin: 1em 0; }
+.out.md a { color: var(--accent); }
+.out.md .md-table { overflow-x: auto; }
+.out.md table { border-collapse: collapse; font-size: .95em; }
+.out.md th, .out.md td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; vertical-align: top; }
+.out.md th { background: var(--panel-2); font-weight: 600; }
+.section-title .title-actions { display: inline-flex; gap: 6px; }
