@@ -6,7 +6,14 @@ _Last updated: 2026-10-12_
 **Deployed and live** on the user's cluster: namespace `agent-spawner`, console at http://192.168.1.64:30880 (NodePort 30880 on any node). See deployment.md for every detail. Next steps depend on the user.
 
 ## Recent changes
-### 2026-10-17: per-agent sizing + rules check (0.1.27, branch `feat/fit-and-check`)
+### 2026-10-17: email + password accounts (0.1.28, branch `feat/password-login`)
+- Migration 007: `app_user` (email unique lowercase, argon2id `password_hash`, `session_epoch`, `disabled`) and `auth_secret` (session-signing key generated once, shared by API replicas).
+- `internal/auth`: argon2id (m=19456 KiB, t=2, p=1, 16-byte salt, PHC string); v2 account sessions `v2.<exp>.<uid>.<epoch>.<mac>` checked against the account (15 s cache per replica); password change / reset / disable bumps the epoch → other sessions revoked. Lockout: 5 failures per email in 15 min → 429 for 15 min; 0.5 s fail delay; dummy hash for unknown emails (equal timing). Token login (v1) unchanged; accounts alone also enable auth.
+- `spawner user set|disable|enable <email>` (password on stdin) and `list`, run via `kubectl exec -i deploy/spawner-api -c api -- /spawner user ...`.
+- Console: email/password sign-in (token as fallback link), account email in the top bar opens "Change password".
+- The user's account was created; its initial password is in `~/.config/agent-spawner/password` (0600) on the dev box. Never print it, never commit the account email (public repo).
+- Verified on the cluster: API login 200 / wrong 401, hash stored as argon2id; Playwright on a throwaway account (deleted afterwards): wrong-password message, header shows the account, password change keeps this session and revokes the other (401), old password 401, sign-out.
+### 2026-10-17: per-agent sizing + rules check (0.1.27, merged via PR #10)
 - LM Studio confirmed back at 32,000 context / 8 slots (the user reloaded it).
 - Per-agent sizing (`agent.PartBudget`, `agent.MaxReferenceChars`, API `fitToModel`): reference may take 40% of the worker model's context (38,400 chars at 32k); each agent's own input gets 90% of context minus reference, instruction and output reserve; parts get a lower max_part_tokens and documents more chunks when needed (response `sizing`); 400 if the reference leaves no room.
 - Rules check (setting `check_answer`, default on, no omitempty; request/MCP `check`; composer "Rules check" box): when a tree has reference material and the root answer is model-written (direct exec or llm merge), one more pass with the reducer model fixes/removes conflicting recommendations and appends "### Rules check". Root stats `checked` / `check_error`; failure keeps the unchecked answer with a note.

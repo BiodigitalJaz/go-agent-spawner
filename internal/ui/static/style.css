@@ -421,3 +421,10 @@ details.thinking.live summary .lbl::after { content: "…"; animation: pulse 1.2
 .refbox summary { cursor: pointer; font-size: 13px; color: var(--muted); }
 .refbox pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; max-height: 360px; overflow: auto; margin: 8px 0 0; }
 .limits .check-field { grid-column: 1 / -1; }
+
+/* Account button in the top bar; link-style buttons in the sign-in box. */
+.vitals .account { background: none; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: 12.5px; padding: 3px 10px; cursor: pointer; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vitals .account:hover { color: var(--text); border-color: var(--accent); }
+.login-box .link { align-self: center; margin-top: 4px; }
+@media (max-width: 700px) { .vitals .account { display: none; } }
+[hidden] { display: none !important; }

@@ -7,6 +7,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -58,8 +59,15 @@ func buildVersion() string {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: spawner migrate|api|worker|all|mcp")
+		fmt.Fprintln(os.Stderr, "usage: spawner migrate|api|worker|all|mcp|user")
 		os.Exit(2)
+	}
+	if os.Args[1] == "user" {
+		if err := runUser(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "spawner user:", err)
+			os.Exit(1)
+		}
+		return
 	}
 	if os.Args[1] == "mcp" {
 		// stdio MCP server: a thin client of a running spawner API. Needs no
@@ -161,10 +169,13 @@ func run(mode string) error {
 	}
 
 	authn := auth.New(log, cfg.AuthTokens, cfg.AuthSessionTTL)
+	if err := authn.WithUsers(ctx, auth.PGUsers{DB: db}); err != nil {
+		return fmt.Errorf("accounts: %w", err)
+	}
 	if authn.Enabled() {
 		log.Info("authentication enabled", "tokens", len(cfg.AuthTokens))
 	} else {
-		log.Warn("authentication DISABLED: set AUTH_TOKENS to protect the API and console")
+		log.Warn("authentication DISABLED: set AUTH_TOKENS or create an account (spawner user set <email>) to protect the API and console")
 	}
 	mux := http.NewServeMux()
 	authn.Routes(mux)
@@ -419,4 +430,78 @@ func runMCP() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	return srv.Run(ctx, &mcp.StdioTransport{})
+}
+
+// runUser manages console accounts. The password is read from stdin so it
+// never appears in process lists or shell history:
+//
+//	spawner user set <email>      create or reset (password on stdin; ends its sessions)
+//	spawner user disable <email>  block sign-in and end its sessions
+//	spawner user enable <email>
+//	spawner user list
+func runUser(args []string) error {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		return errors.New("DATABASE_URL is required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	db, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	users := auth.PGUsers{DB: db}
+	usage := errors.New("usage: spawner user set|disable|enable <email> | spawner user list")
+	if len(args) == 0 {
+		return usage
+	}
+	switch args[0] {
+	case "list":
+		list, err := users.List(ctx)
+		if err != nil {
+			return err
+		}
+		for _, u := range list {
+			state := "active"
+			if u.Disabled {
+				state = "disabled"
+			}
+			fmt.Printf("%s\t%s\tcreated %s\tupdated %s\n", u.Email, state, u.CreatedAt.Format(time.RFC3339), u.UpdatedAt.Format(time.RFC3339))
+		}
+		return nil
+	case "set", "disable", "enable":
+		if len(args) != 2 || !strings.Contains(args[1], "@") {
+			return usage
+		}
+	default:
+		return usage
+	}
+	email := auth.NormalizeEmail(args[1])
+	switch args[0] {
+	case "disable", "enable":
+		if err := users.SetDisabled(ctx, email, args[0] == "disable"); err != nil {
+			return err
+		}
+		fmt.Printf("%s %sd\n", email, args[0])
+		return nil
+	}
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && line == "" {
+		return errors.New("pipe the password on stdin")
+	}
+	hash, err := auth.HashPassword(strings.TrimRight(line, "\r\n"))
+	if err != nil {
+		return err
+	}
+	created, err := users.UpsertUser(ctx, email, hash)
+	if err != nil {
+		return err
+	}
+	if created {
+		fmt.Printf("created %s\n", email)
+	} else {
+		fmt.Printf("password reset for %s (its sessions were ended)\n", email)
+	}
+	return nil
 }
