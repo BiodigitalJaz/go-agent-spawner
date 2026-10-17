@@ -53,14 +53,30 @@ The API serves a web console at `/`. It's embedded in the binary and needs no bu
 
 ### Authentication
 
-Set `AUTH_TOKENS` (comma-separated; in Kubernetes the `spawner-auth` Secret) to require a token for everything under `/v1` and `/debug`. Health checks and the console's static shell stay public.
+Everything under `/v1`, `/debug` and `/mcp` needs authentication once either accounts or tokens exist. Health checks and the console's static shell stay public.
 
-- **Scripts and agents:** `Authorization: Bearer <token>` on every request, including SSE streams.
-- **Browser:** the console asks for a token once and trades it for a signed session cookie (`HttpOnly`, `SameSite=Strict`, `Secure` behind HTTPS), valid for `AUTH_SESSION_TTL` (default 7 days). Sessions work across API replicas with no shared store.
+**Accounts (people).** Sign in to the console with an email and password.
+- Passwords are stored as **argon2id** hashes (19 MiB, 2 passes, 1 lane, 16-byte salt), never in plain text, and must be at least 12 characters.
+- Manage accounts with the binary; the password is read from stdin, so it never lands in shell history or process lists:
+  ```sh
+  kubectl -n agent-spawner exec -i deploy/spawner-api -c api -- /spawner user set someone@example.com < password-file
+  kubectl -n agent-spawner exec deploy/spawner-api -c api -- /spawner user list
+  kubectl -n agent-spawner exec deploy/spawner-api -c api -- /spawner user disable someone@example.com
+  ```
+  `set` creates the account or resets its password.
+- **Change password:** click your email in the console's top bar. Changing a password, resetting it with `user set`, or disabling the account signs out every session of that account. Other API replicas notice within 15 seconds.
+- **Brute force:** each failed sign-in waits 0.5 s, and an email is locked for 15 minutes after 5 failures. Failures, logins and password changes are logged.
+
+**Tokens (scripts, agents, administrators).** Set `AUTH_TOKENS` (comma-separated; in Kubernetes, the `spawner-auth` Secret).
+- Send `Authorization: Bearer <token>` on every request, including SSE streams and `/mcp`.
+- The console's sign-in screen also accepts a token ("Use an access token instead").
 - **Revoking:** remove a token from the Secret and restart the pods. Every session created with that token stops working.
+
+**Sessions.** The console keeps a signed session cookie (`HttpOnly`, `SameSite=Strict`, `Secure` behind HTTPS), valid for `AUTH_SESSION_TTL` (default 7 days).
+- Account sessions are signed with a key generated once and stored in Postgres, so every API replica accepts them.
 - Cookie-authenticated writes from another origin are refused.
 
-Without `AUTH_TOKENS` the API is open and logs a warning at startup.
+Without accounts or `AUTH_TOKENS`, the API is open and logs a warning at startup.
 
 ### Merge strategies
 

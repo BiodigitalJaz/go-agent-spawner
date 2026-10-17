@@ -1510,26 +1510,76 @@ let loginShown = false;
 function showLogin(message) {
   if (loginShown) return;
   loginShown = true;
-  const input = h("input", { type: "password", autocomplete: "current-password", placeholder: "Access token", "aria-label": "Access token" });
+  // Email and password by default; an access token remains available.
+  let useToken = false;
+  const email = h("input", { type: "email", autocomplete: "username", placeholder: "Email", "aria-label": "Email" });
+  const password = h("input", { type: "password", autocomplete: "current-password", placeholder: "Password", "aria-label": "Password" });
+  const token = h("input", { type: "password", autocomplete: "off", placeholder: "Access token", "aria-label": "Access token", hidden: true });
+  const hint = h("p", { class: "muted" }, "Sign in with your account.");
   const err = h("div", { class: "login-error", role: "alert" }, message || "");
   const go = h("button", { class: "btn primary", type: "submit" }, "Sign in");
+  const toggle = h("button", { class: "link", type: "button", onclick: () => {
+    useToken = !useToken;
+    email.hidden = password.hidden = useToken;
+    token.hidden = !useToken;
+    setText(toggle, useToken ? "Sign in with email and password" : "Use an access token instead");
+    hint.replaceChildren(...(useToken
+      ? ["Enter an access token (for administrators; see the cluster secret ", h("code", {}, "spawner-auth"), ")."]
+      : ["Sign in with your account."]));
+    setText(err, "");
+    (useToken ? token : email).focus();
+  } }, "Use an access token instead");
   const form = h("form", { class: "panel login-box", onsubmit: async (e) => {
     e.preventDefault();
     go.disabled = true;
     setText(err, "");
+    const body = useToken ? { token: token.value.trim() } : { email: email.value.trim(), password: password.value };
     try {
-      const res = await fetch("/v1/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token: input.value.trim() }) });
+      const res = await fetch("/v1/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       if (res.ok) { location.reload(); return; }
-      setText(err, res.status === 401 ? "That token isn't valid." : `Sign-in failed (${res.status}).`);
+      const msg = (await res.json().catch(() => ({}))).error;
+      setText(err, res.status === 401 ? (useToken ? "That token isn't valid." : "Wrong email or password.")
+        : res.status === 429 ? (msg || "Too many attempts. Try again later.") : `Sign-in failed (${res.status}).`);
     } catch { setText(err, "Can't reach the server."); }
     go.disabled = false;
-    input.select();
+    (useToken ? token : password).select();
   } },
     h("h1", {}, "Sign in to Agent Spawner"),
-    h("p", { class: "muted" }, "Enter an access token. Ask the administrator, or read it from the cluster secret ", h("code", {}, "spawner-auth"), "."),
-    input, err, go);
+    hint, email, password, token, err, go, toggle);
   document.body.append(h("div", { class: "login-overlay" }, form));
-  input.focus();
+  email.focus();
+}
+
+// showChangePassword lets an account holder change their password. Other
+// sessions of the account are signed out; this one continues.
+function showChangePassword() {
+  const current = h("input", { type: "password", autocomplete: "current-password", placeholder: "Current password", "aria-label": "Current password" });
+  const next = h("input", { type: "password", autocomplete: "new-password", placeholder: "New password (12+ characters)", "aria-label": "New password", minlength: 12 });
+  const again = h("input", { type: "password", autocomplete: "new-password", placeholder: "Repeat new password", "aria-label": "Repeat new password" });
+  const err = h("div", { class: "login-error", role: "alert" });
+  const go = h("button", { class: "btn primary", type: "submit" }, "Change password");
+  const overlay = h("div", { class: "login-overlay" });
+  const close = () => overlay.remove();
+  const form = h("form", { class: "panel login-box", onsubmit: async (e) => {
+    e.preventDefault();
+    if (next.value !== again.value) { setText(err, "The new passwords don't match."); return; }
+    go.disabled = true;
+    setText(err, "");
+    try {
+      const res = await fetch("/v1/account/password", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ current: current.value, new: next.value }) });
+      if (res.ok) { close(); toast("Password changed. Other sessions were signed out."); return; }
+      setText(err, (await res.json().catch(() => ({}))).error || `Failed (${res.status}).`);
+    } catch { setText(err, "Can't reach the server."); }
+    go.disabled = false;
+  } },
+    h("h1", {}, "Change password"),
+    h("p", { class: "muted" }, "Other sessions of this account will be signed out."),
+    current, next, again, err, go,
+    h("button", { class: "link", type: "button", onclick: close }, "Cancel"));
+  overlay.append(form);
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+  document.body.append(overlay);
+  current.focus();
 }
 
 async function checkSessionQuiet() {
@@ -1547,6 +1597,9 @@ async function checkSession() {
     if (s.auth && s.authenticated) {
       const out = h("button", { class: "icon-btn signout", title: "Sign out", "aria-label": "Sign out",
         onclick: async () => { await fetch("/v1/logout", { method: "POST" }); location.reload(); } }, "⎋");
+      if (s.user) {
+        $("#theme-toggle").before(h("button", { class: "account", title: "Change password", onclick: showChangePassword }, s.user));
+      }
       $("#theme-toggle").before(out);
     }
     return !s.auth || s.authenticated;
