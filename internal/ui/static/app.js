@@ -381,11 +381,11 @@ function buildComposer() {
     prompt,
     h("div", { class: "opts" }, model, depth, children, priority, merge),
     docBox,
+    // Options on one line, then a full-width Run: the sidebar is narrow.
     h("div", { class: "actions" },
-      fetchLabel,
-      checkLabel,
-      h("span", { class: "faint", style: "font-size:12px" }, "Overrides apply to this run only"),
-      run));
+      h("div", { class: "checks" }, fetchLabel, checkLabel),
+      run,
+      h("span", { class: "faint overrides" }, "Overrides apply to this run only")));
   return { el, refreshModels };
 }
 
