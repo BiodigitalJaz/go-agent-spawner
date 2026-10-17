@@ -47,8 +47,10 @@ func (m *memUsers) SetPassword(_ context.Context, id uuid.UUID, hash string) (in
 	u.Hash, u.Epoch = hash, u.Epoch+1
 	return u.Epoch, nil
 }
-func (m *memUsers) Any(context.Context) (bool, error)          { return len(m.users) > 0, nil }
-func (m *memUsers) SessionKey(context.Context) ([]byte, error) { return []byte("test-session-key"), nil }
+func (m *memUsers) Any(context.Context) (bool, error) { return len(m.users) > 0, nil }
+func (m *memUsers) SessionKey(context.Context) ([]byte, error) {
+	return []byte("test-session-key"), nil
+}
 
 const pw = "correct horse battery staple"
 
