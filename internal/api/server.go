@@ -25,6 +25,7 @@ import (
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/backend"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/discovery"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/events"
+	"github.com/BiodigitalJaz/go-agent-spawner/internal/fetch"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/models"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/settings"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/store"
@@ -41,6 +42,8 @@ type Server struct {
 	workers   *workerRegistry
 	// SearchEnabled: the workers have a search backend (SEARCH_URL).
 	SearchEnabled bool
+	// SearchBudget reports the paid provider's spend this month (Exa).
+	SearchBudget fetch.Budget
 }
 
 func New(log *slog.Logger, db *pgxpool.Pool, client *river.Client[pgx.Tx], bus *events.Bus, registry *models.Registry, defaults settings.Settings) *Server {
@@ -356,6 +359,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		"updated_at":     st.UpdatedAt,
 		"defaults":       s.defaults,
 		"search_enabled": s.SearchEnabled,
+		"search_budget":  s.searchBudget(r.Context()),
 	})
 }
 
@@ -832,4 +836,16 @@ func treeContext(set *settings.Settings) string {
 		return ""
 	}
 	return set.Context
+}
+
+// searchBudget reports this month's Exa spend against its free-tier cap.
+func (s *Server) searchBudget(ctx context.Context) map[string]any {
+	if s.SearchBudget == nil {
+		return nil
+	}
+	spent, err := s.SearchBudget.Spent(ctx)
+	if err != nil {
+		return nil
+	}
+	return map[string]any{"provider": "exa", "spent_usd": spent, "limit_usd": s.SearchBudget.Limit(), "month": time.Now().UTC().Format("2006-01")}
 }

@@ -24,3 +24,6 @@ Out of scope so far: auth on the API and UI, multi-tenant isolation, tool-callin
 - Module: `github.com/BiodigitalJaz/go-agent-spawner` (renamed from an early `thinkbotlabs` guess on 2026-10-12).
 - **Git:** public GitHub repo https://github.com/BiodigitalJaz/go-agent-spawner, branch `main`, remote over SSH (`git@github.com:BiodigitalJaz/go-agent-spawner.git`). First commit 2026-10-12. Commit or push only when the user asks; commits end with the Co-Authored-By attribution line.
 - The repo is PUBLIC: never commit secrets (the DB URL lives only in the cluster Secret `agent-spawner/spawner-db`). LAN IPs and the cluster hostname are in the overlay and memory bank by the user's choice.
+
+## Constraints set by the user
+- Web search must always stay on free tiers (Exa free credit, self-hosted SearXNG). It will never be a purchased service: keep the spend cap, never propose paid plans or paid search types.
