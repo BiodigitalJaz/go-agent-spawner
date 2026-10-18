@@ -100,6 +100,20 @@ func TestFitToModel(t *testing.T) {
 	if _, err := fitToModel(&createRequest{Prompt: "x"}, 8192, 0, ref); err == nil {
 		t.Fatal("a reference that leaves no room must be refused")
 	}
+	// Auto (chunks 0): a small document is read whole; a large one is split.
+	req = &createRequest{Prompt: "explain", Document: strings.Repeat("d", 9_600)} // ~2.4k tokens
+	if note, err := fitToModel(req, 32000, 0, ""); err != nil || req.Chunks != 1 || !strings.Contains(note, "read whole") {
+		t.Fatalf("auto small: chunks %d note %q err %v", req.Chunks, note, err)
+	}
+	req = &createRequest{Prompt: "summarize", Document: strings.Repeat("d", 160_000)} // ~40k tokens
+	if note, err := fitToModel(req, 32000, 0, ""); err != nil || req.Chunks != 6 || !strings.Contains(note, "automatically") {
+		t.Fatalf("auto large: chunks %d note %q err %v", req.Chunks, note, err)
+	}
+	// An explicit count is kept.
+	req = &createRequest{Prompt: "explain", Document: strings.Repeat("d", 9_600), Chunks: 3}
+	if note, err := fitToModel(req, 32000, 0, ""); err != nil || req.Chunks != 3 || note != "" {
+		t.Fatalf("explicit: chunks %d note %q err %v", req.Chunks, note, err)
+	}
 	if got := agent.MaxReferenceChars(32000); got != 38_400 {
 		t.Fatalf("MaxReferenceChars(32000) = %d", got)
 	}

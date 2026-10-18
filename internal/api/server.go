@@ -83,7 +83,8 @@ type createRequest struct {
 	MaxDepth    *int   `json:"max_depth,omitempty"`
 	MaxChildren *int   `json:"max_children,omitempty"`
 	// Document mode: the prompt is the instruction, the document is split in
-	// code into Chunks parts (1 or 0 = single context).
+	// code into Chunks parts. 0 (or omitted) chooses automatically: one
+	// agent up to about 6k tokens, more chunks above; 1 = one agent.
 	Document string `json:"document,omitempty"`
 	Chunks   int    `json:"chunks,omitempty"`
 	// Merge overrides how split results are combined: llm, concat or list.
