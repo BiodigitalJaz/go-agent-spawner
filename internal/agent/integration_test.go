@@ -813,6 +813,26 @@ func TestWebSearchAddsResultsToReference(t *testing.T) {
 	}
 }
 
+func TestSearchBudgetIsSharedAndMonthly(t *testing.T) {
+	h := setup(t, &fakeLLM{})
+	ctx := context.Background()
+	oct := func() time.Time { return time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC) }
+	nov := func() time.Time { return time.Date(2026, 11, 1, 0, 0, 1, 0, time.UTC) }
+	a := &fetch.PGBudget{DB: h.db, Provider: "exa", LimitUSD: 9.5, Now: oct}
+	b := &fetch.PGBudget{DB: h.db, Provider: "exa", LimitUSD: 9.5, Now: oct} // another worker
+	for _, x := range []*fetch.PGBudget{a, b, a} {
+		if err := x.Record(ctx, 0.004); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if spent, err := b.Spent(ctx); err != nil || spent < 0.0119 || spent > 0.0121 {
+		t.Fatalf("shared spend = %v %v", spent, err)
+	}
+	if spent, _ := (&fetch.PGBudget{DB: h.db, Provider: "exa", LimitUSD: 9.5, Now: nov}).Spent(ctx); spent != 0 {
+		t.Fatalf("a new month starts at zero, got %v", spent)
+	}
+}
+
 func TestPurgeTreeRemovesEveryRecord(t *testing.T) {
 	h := setup(t, &fakeLLM{split: []string{"one", "two"}})
 	ctx := context.Background()

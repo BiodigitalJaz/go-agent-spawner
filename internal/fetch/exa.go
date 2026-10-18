@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -21,9 +22,22 @@ type Exa struct {
 	Type       string // "instant" is the cheapest and fastest
 	NumResults int
 	MaxChars   int
-	log        *slog.Logger
-	client     *http.Client
+	// Budget, when set, stops Exa before its monthly free credit runs out
+	// (this project never pays for search). Unrecorded costs are estimated.
+	Budget Budget
+	log    *slog.Logger
+	client *http.Client
 }
+
+// ErrBudget means the monthly free-tier budget is used up.
+var ErrBudget = errors.New("monthly free-tier budget used up")
+
+// freeTypes are the only search types allowed: the cheapest ones. Deep
+// research types cost several times more and would drain the free credit.
+var freeTypes = map[string]bool{"instant": true, "fast": true, "auto": true}
+
+// estimatedCost is used when Exa omits costDollars: the instant price.
+const estimatedCost = 0.004
 
 func NewExa(log *slog.Logger, key string) *Exa {
 	return &Exa{BaseURL: "https://api.exa.ai", Key: key, Type: "instant", NumResults: 5, MaxChars: 4000,
@@ -33,6 +47,18 @@ func NewExa(log *slog.Logger, key string) *Exa {
 func (e *Exa) Name() string { return "exa" }
 
 func (e *Exa) Search(ctx context.Context, query string) ([]SearchResult, error) {
+	if !freeTypes[e.Type] {
+		return nil, fmt.Errorf("exa search type %q is not allowed (free tier: instant, fast or auto)", e.Type)
+	}
+	if e.Budget != nil {
+		spent, err := e.Budget.Spent(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("check exa budget: %w", err)
+		}
+		if spent+estimatedCost > e.Budget.Limit() {
+			return nil, fmt.Errorf("%w ($%.3f of $%.2f this month; resets on the 1st)", ErrBudget, spent, e.Budget.Limit())
+		}
+	}
 	body, _ := json.Marshal(map[string]any{
 		"query": query, "type": e.Type, "numResults": e.NumResults,
 		"contents": map[string]any{"text": map[string]any{"maxCharacters": e.MaxChars}},
@@ -70,7 +96,16 @@ func (e *Exa) Search(ctx context.Context, query string) ([]SearchResult, error) 
 	if err := json.Unmarshal(data, &out); err != nil {
 		return nil, fmt.Errorf("decode exa results: %w", err)
 	}
-	e.log.Info("exa search", "query", query, "results", len(out.Results), "cost_usd", out.CostDollars.Total)
+	cost := out.CostDollars.Total
+	if cost <= 0 {
+		cost = estimatedCost
+	}
+	if e.Budget != nil {
+		if err := e.Budget.Record(ctx, cost); err != nil {
+			e.log.Warn("record exa spend", "err", err)
+		}
+	}
+	e.log.Info("exa search", "query", query, "results", len(out.Results), "cost_usd", cost)
 	kept := 0
 	for _, r := range out.Results {
 		if r.URL != "" {
@@ -87,7 +122,7 @@ func (e *Exa) Search(ctx context.Context, query string) ([]SearchResult, error) 
 			snippet = strings.ToValidUTF8(snippet[:240], "") + "…"
 		}
 		res = append(res, SearchResult{URL: r.URL, Title: strings.TrimSpace(r.Title), Snippet: snippet, Text: r.Text,
-			Engines: []string{"exa"}, CostUSD: out.CostDollars.Total / float64(kept)})
+			Engines: []string{"exa"}, CostUSD: cost / float64(kept)})
 	}
 	return res, nil
 }

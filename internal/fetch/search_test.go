@@ -89,3 +89,47 @@ func TestMulti(t *testing.T) {
 		t.Fatalf("a failed search must not be cached; exa calls = %d", b.calls.Load())
 	}
 }
+
+type memBudget struct {
+	spent, limit float64
+	records      int
+}
+
+func (m *memBudget) Spent(context.Context) (float64, error) { return m.spent, nil }
+func (m *memBudget) Record(_ context.Context, c float64) error {
+	m.spent += c
+	m.records++
+	return nil
+}
+func (m *memBudget) Limit() float64 { return m.limit }
+
+func TestExaStaysInFreeTier(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Write([]byte(`{"results":[{"url":"https://example.com/a","title":"A","text":"x"}]}`)) // no costDollars
+	}))
+	defer srv.Close()
+	e := NewExa(slog.New(slog.NewTextHandler(io.Discard, nil)), "k")
+	e.BaseURL = srv.URL
+	b := &memBudget{limit: 0.010}
+	e.Budget = b
+	// Two queries fit; the missing cost is recorded at the instant estimate.
+	for i := 0; i < 2; i++ {
+		if _, err := e.Search(context.Background(), "q"); err != nil {
+			t.Fatalf("query %d: %v", i, err)
+		}
+	}
+	if b.records != 2 || b.spent != 2*estimatedCost {
+		t.Fatalf("recorded %d, spent %.4f", b.records, b.spent)
+	}
+	// The third would pass the cap: refused without calling Exa.
+	if _, err := e.Search(context.Background(), "q"); !errors.Is(err, ErrBudget) || calls.Load() != 2 {
+		t.Fatalf("over budget: err %v, calls %d", err, calls.Load())
+	}
+	// Paid research types are never used.
+	e.Budget, e.Type = nil, "deep"
+	if _, err := e.Search(context.Background(), "q"); err == nil || calls.Load() != 2 {
+		t.Fatalf("deep search must be refused: %v", err)
+	}
+}

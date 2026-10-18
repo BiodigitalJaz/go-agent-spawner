@@ -62,38 +62,42 @@ type Config struct {
 	// ExaAPIKey enables Exa web search (official API, its own index).
 	ExaAPIKey string
 	ExaType   string
+	// ExaMonthlyBudgetUSD caps Exa spend per calendar month, under the free
+	// credit: search is never paid for.
+	ExaMonthlyBudgetUSD float64
 }
 
 var modelName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,55}$`)
 
 func Load() (*Config, error) {
 	c := &Config{
-		DatabaseURL:       os.Getenv("DATABASE_URL"),
-		NATSURL:           env("NATS_URL", "nats://localhost:4222"),
-		HTTPAddr:          env("HTTP_ADDR", ":8080"),
-		LogLevel:          env("LOG_LEVEL", "info"),
-		Queues:            list(os.Getenv("WORKER_QUEUES")),
-		MaxDepth:          envInt("MAX_DEPTH", 2),
-		MaxChildren:       envInt("MAX_CHILDREN", 6),
-		MaxWorkers:        envInt("MAX_WORKERS_PER_QUEUE", 32),
-		AcquireWait:       envDur("ACQUIRE_WAIT", time.Second),
-		Snooze:            envDur("SNOOZE", 250*time.Millisecond),
-		DeltaInterval:     envDur("DELTA_INTERVAL", 50*time.Millisecond),
-		JobTimeout:        envDur("JOB_TIMEOUT", 10*time.Minute),
-		FetchCooldown:     envDur("RIVER_FETCH_COOLDOWN", 20*time.Millisecond),
-		FetchPollInterval: envDur("RIVER_FETCH_POLL_INTERVAL", 250*time.Millisecond),
-		RiverPollOnly:     envBool("RIVER_POLL_ONLY", false),
-		DiscoveryInterval: envDur("DISCOVERY_INTERVAL", 10*time.Second),
-		ShutdownTimeout:   envDur("SHUTDOWN_TIMEOUT", 2*time.Minute),
-		EventRetention:    envDur("EVENT_RETENTION", 15*time.Minute),
-		EventReplicas:     envInt("EVENT_REPLICAS", 1),
-		EventFileStore:    envBool("EVENT_FILE_STORE", false),
-		AuthTokens:        list(os.Getenv("AUTH_TOKENS")),
-		AuthSessionTTL:    envDur("AUTH_SESSION_TTL", 7*24*time.Hour),
-		SearchURL:         env("SEARCH_URL", ""),
-		SearchCategories:  env("SEARCH_CATEGORIES", ""),
-		ExaAPIKey:         env("EXA_API_KEY", ""),
-		ExaType:           env("EXA_SEARCH_TYPE", "instant"),
+		DatabaseURL:         os.Getenv("DATABASE_URL"),
+		NATSURL:             env("NATS_URL", "nats://localhost:4222"),
+		HTTPAddr:            env("HTTP_ADDR", ":8080"),
+		LogLevel:            env("LOG_LEVEL", "info"),
+		Queues:              list(os.Getenv("WORKER_QUEUES")),
+		MaxDepth:            envInt("MAX_DEPTH", 2),
+		MaxChildren:         envInt("MAX_CHILDREN", 6),
+		MaxWorkers:          envInt("MAX_WORKERS_PER_QUEUE", 32),
+		AcquireWait:         envDur("ACQUIRE_WAIT", time.Second),
+		Snooze:              envDur("SNOOZE", 250*time.Millisecond),
+		DeltaInterval:       envDur("DELTA_INTERVAL", 50*time.Millisecond),
+		JobTimeout:          envDur("JOB_TIMEOUT", 10*time.Minute),
+		FetchCooldown:       envDur("RIVER_FETCH_COOLDOWN", 20*time.Millisecond),
+		FetchPollInterval:   envDur("RIVER_FETCH_POLL_INTERVAL", 250*time.Millisecond),
+		RiverPollOnly:       envBool("RIVER_POLL_ONLY", false),
+		DiscoveryInterval:   envDur("DISCOVERY_INTERVAL", 10*time.Second),
+		ShutdownTimeout:     envDur("SHUTDOWN_TIMEOUT", 2*time.Minute),
+		EventRetention:      envDur("EVENT_RETENTION", 15*time.Minute),
+		EventReplicas:       envInt("EVENT_REPLICAS", 1),
+		EventFileStore:      envBool("EVENT_FILE_STORE", false),
+		AuthTokens:          list(os.Getenv("AUTH_TOKENS")),
+		AuthSessionTTL:      envDur("AUTH_SESSION_TTL", 7*24*time.Hour),
+		SearchURL:           env("SEARCH_URL", ""),
+		SearchCategories:    env("SEARCH_CATEGORIES", ""),
+		ExaAPIKey:           env("EXA_API_KEY", ""),
+		ExaType:             env("EXA_SEARCH_TYPE", "instant"),
+		ExaMonthlyBudgetUSD: envFloat("EXA_MONTHLY_BUDGET_USD", 9.5),
 	}
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")
@@ -172,4 +176,13 @@ func list(s string) []string {
 		}
 	}
 	return out
+}
+
+func envFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	}
+	return def
 }

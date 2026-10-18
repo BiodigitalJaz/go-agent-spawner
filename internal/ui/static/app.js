@@ -1088,6 +1088,12 @@ function settingsView(root) {
             onchange: (e) => { if (e.target.checked) form.allow_internal_fetch = true; else delete form.allow_internal_fetch; updateBar(); } }),
             " Allow fetching internal network addresses"),
           h("span", { class: "note" }, "Off by default. When on, “Fetch linked pages” may reach private, loopback, link-local and cluster addresses (internal wikis, dashboards, services). Every attempt on an internal address is logged by the API, allowed or blocked.")),
+        app.settings?.search_budget ? h("div", { class: "field check-field" },
+          h("span", {}, "Web search budget"),
+          h("span", { class: "note" }, (() => {
+            const b = app.settings.search_budget;
+            return `Exa used $${b.spent_usd.toFixed(3)} of $${b.limit_usd.toFixed(2)} in ${b.month}. Search stays on the free tier: at the cap Exa stops and search continues on SearXNG until the 1st.`;
+          })())) : null,
         h("label", { class: "field check-field" },
           h("span", {}, h("input", { type: "checkbox", checked: form.check_answer !== false,
             onchange: (e) => { form.check_answer = e.target.checked; updateBar(); } }),

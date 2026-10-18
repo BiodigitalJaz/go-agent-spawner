@@ -142,6 +142,7 @@ func run(mode string) error {
 	if cfg.ExaAPIKey != "" {
 		exa := fetch.NewExa(log, cfg.ExaAPIKey)
 		exa.Type = cfg.ExaType
+		exa.Budget = &fetch.PGBudget{DB: db, Provider: "exa", LimitUSD: cfg.ExaMonthlyBudgetUSD}
 		backends = append(backends, exa)
 	}
 	if len(backends) > 0 {
@@ -237,6 +238,9 @@ func run(mode string) error {
 		defaults := settings.Defaults(cfg.Backends.Planner, cfg.Backends.Default, cfg.MaxDepth, cfg.MaxChildren)
 		apiSrv := api.New(log, db, client, bus, registry, defaults)
 		apiSrv.SearchEnabled = cfg.SearchURL != "" || cfg.ExaAPIKey != ""
+		if cfg.ExaAPIKey != "" {
+			apiSrv.SearchBudget = &fetch.PGBudget{DB: db, Provider: "exa", LimitUSD: cfg.ExaMonthlyBudgetUSD}
+		}
 		if err := apiSrv.Start(gctx); err != nil {
 			return err
 		}
