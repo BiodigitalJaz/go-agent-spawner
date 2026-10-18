@@ -61,7 +61,7 @@ func (w *Worker) search(ctx context.Context, t *task, lease *backend.Lease) (*ba
 		Queries []string `json:"queries"`
 	}
 	linked := linkedPages(t.set.Context)
-	user := "Task:\n" + t.node.Prompt
+	user := "Task:\n" + conversationBlock(t.set, t.node) + t.node.Prompt
 	if len(linked) > 0 {
 		user += "\n\nPages from the task's links, already fetched:\n- " + strings.Join(linked, "\n- ")
 	}

@@ -38,6 +38,7 @@ type fetchedPage struct {
 	Title     string `json:"title,omitempty"`
 	Chars     int    `json:"chars"`
 	Truncated bool   `json:"truncated,omitempty"`
+	Error     string `json:"error,omitempty"` // soft fetch: why the page could not be opened
 }
 
 type requestError struct {
@@ -75,8 +76,18 @@ func (s *Server) reference(ctx context.Context, req *createRequest, set settings
 	}
 	f := fetch.New(s.log.With("fetch_requested_by", remote), set.AllowInternalFetch)
 	pages := make([]*fetch.Page, len(urls))
+	var failed []fetchedPage
 	for i, u := range urls {
 		p, err := f.Fetch(ctx, u)
+		if err == nil && strings.TrimSpace(p.Text) == "" {
+			err = errors.New("no readable text (it may be rendered by JavaScript)")
+		}
+		if err != nil && req.softFetch {
+			// Chat: a dead link should not stop the conversation. The agent
+			// is told which links failed and why, and says so.
+			failed = append(failed, fetchedPage{URL: u, Error: err.Error()})
+			continue
+		}
 		if err != nil {
 			status := http.StatusBadGateway
 			if errors.Is(err, fetch.ErrInternal) {
@@ -90,15 +101,24 @@ func (s *Server) reference(ctx context.Context, req *createRequest, set settings
 		}
 		pages[i] = p
 	}
+	ok := pages[:0]
+	for _, p := range pages {
+		if p != nil {
+			ok = append(ok, p)
+		}
+	}
+	pages = ok
 	// Share what room is left after the caller's own context between pages.
 	// With both present, label their roles: the pages are what the task is
 	// about, the supplied text is what the answer must respect (without the
 	// labels, models reviewed the guidelines instead of the page).
-	room := (maxChars - len(userCtx) - 200) / len(pages)
+	room := (maxChars - len(userCtx) - 200) / max(len(pages), 1)
 	// Linked pages are always labelled: they are what the task is about, and
 	// a later web search adds background that must not be mistaken for them.
 	var b strings.Builder
-	b.WriteString(linkedPagesMarker + " (fetched from the links in the task; the task is about these) ===\n\n")
+	if len(pages) > 0 {
+		b.WriteString(linkedPagesMarker + " (fetched from the links in the task; the task is about these) ===\n\n")
+	}
 	report := make([]fetchedPage, len(pages))
 	for i, p := range pages {
 		text, cut := p.Text, false
@@ -115,6 +135,14 @@ func (s *Server) reference(ctx context.Context, req *createRequest, set settings
 		}
 		b.WriteString("\n")
 		report[i] = fetchedPage{URL: p.URL, Title: p.Title, Chars: len(text), Truncated: cut}
+	}
+	if len(failed) > 0 {
+		b.WriteString("=== LINKS THAT COULD NOT BE OPENED (tell the user; do not guess their content) ===\n")
+		for _, f := range failed {
+			fmt.Fprintf(&b, "- %s: %s\n", f.URL, f.Error)
+		}
+		b.WriteString("\n")
+		report = append(report, failed...)
 	}
 	if userCtx != "" {
 		b.WriteString("=== GUIDELINES AND FACTS TO RESPECT (supplied with the task) ===\n\n")

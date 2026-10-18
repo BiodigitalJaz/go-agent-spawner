@@ -60,6 +60,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/trees", s.listTrees)
 	mux.HandleFunc("GET /v1/trees/{id}", s.getTree)
 	mux.HandleFunc("DELETE /v1/trees/{id}", s.cancelTree)
+	s.chatRoutes(mux)
 	mux.HandleFunc("GET /v1/trees/{id}/events", s.streamTree)
 	mux.HandleFunc("GET /v1/events", s.streamAll)
 	mux.HandleFunc("GET /v1/settings", s.getSettings)
@@ -109,6 +110,10 @@ type createRequest struct {
 	// Search runs a web search before planning and gives every agent the
 	// results (needs SEARCH_URL on the server).
 	Search bool `json:"search,omitempty"`
+
+	// softFetch (chat): a link that cannot be fetched becomes a note for
+	// the agent instead of failing the request.
+	softFetch bool
 }
 
 func (s *Server) createTree(w http.ResponseWriter, r *http.Request) {
@@ -117,33 +122,53 @@ func (s *Server) createTree(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if strings.TrimSpace(req.Prompt) == "" {
-		httpError(w, http.StatusBadRequest, "prompt is required")
+	resp, _, err := s.startRun(r.Context(), req, nil, r.RemoteAddr)
+	if err != nil {
+		s.writeRunError(w, err)
 		return
+	}
+	writeJSON(w, http.StatusCreated, resp)
+}
+
+// writeRunError answers a startRun error: request errors with their status,
+// anything else as a 500.
+func (s *Server) writeRunError(w http.ResponseWriter, err error) {
+	var re *requestError
+	if errors.As(err, &re) {
+		httpError(w, re.status, re.msg)
+		return
+	}
+	httpError(w, http.StatusInternalServerError, err.Error())
+}
+
+func badRequest(format string, a ...any) error {
+	return &requestError{http.StatusBadRequest, fmt.Sprintf(format, a...)}
+}
+
+// startRun validates a request and starts its tree: the shared path for
+// POST /v1/trees and chat messages (which add the conversation history).
+func (s *Server) startRun(ctx context.Context, req createRequest, history []settings.Turn, remote string) (map[string]any, uuid.UUID, error) {
+	if strings.TrimSpace(req.Prompt) == "" {
+		return nil, uuid.Nil, badRequest("prompt is required")
 	}
 	if req.Chunks < 0 || req.Chunks > 64 {
-		httpError(w, http.StatusBadRequest, "chunks must be between 0 and 64")
-		return
+		return nil, uuid.Nil, badRequest("chunks must be between 0 and 64")
 	}
 	if req.PartMaxWords < 0 || req.PartMaxWords > 5000 {
-		httpError(w, http.StatusBadRequest, "part_max_words must be between 0 and 5000")
-		return
+		return nil, uuid.Nil, badRequest("part_max_words must be between 0 and 5000")
 	}
 	if len(req.Parts) > 64 {
-		httpError(w, http.StatusBadRequest, "at most 64 parts")
-		return
+		return nil, uuid.Nil, badRequest("at most 64 parts")
 	}
 	for i, p := range req.Parts {
 		if strings.TrimSpace(p.Title) == "" || len(p.Title) > 300 {
-			httpError(w, http.StatusBadRequest, fmt.Sprintf("part %d needs a title of 1-300 characters", i+1))
-			return
+			return nil, uuid.Nil, badRequest("part %d needs a title of 1-300 characters", i+1)
 		}
 	}
-	stored, err := settings.Load(r.Context(), s.db, s.defaults)
+	stored, err := settings.Load(ctx, s.db, s.defaults)
 	if err != nil {
 		s.log.Error("load settings", "err", err)
-		httpError(w, http.StatusInternalServerError, "could not load settings")
-		return
+		return nil, uuid.Nil, errors.New("could not load settings")
 	}
 	set := stored.Settings
 	if req.Model != "" {
@@ -159,30 +184,19 @@ func (s *Server) createTree(w http.ResponseWriter, r *http.Request) {
 		set.Merge = req.Merge
 	}
 	if err := set.Validate(s.knownModel); err != nil {
-		httpError(w, http.StatusUnprocessableEntity, err.Error())
-		return
+		return nil, uuid.Nil, &requestError{http.StatusUnprocessableEntity, err.Error()}
 	}
 	if req.Priority == 0 {
 		req.Priority = 1
 	}
-	ctxLen := 0
-	if m, ok := s.registry.Get(set.Worker.Model); ok {
-		ctxLen = m.ContextLength
-	}
-	reference, fetched, err := s.reference(r.Context(), &req, set, r.RemoteAddr, agent.MaxReferenceChars(ctxLen))
+	ctxLen := s.contextLength(set.Worker.Model)
+	reference, fetched, err := s.reference(ctx, &req, set, remote, agent.MaxReferenceChars(ctxLen))
 	if err != nil {
-		var re *requestError
-		if errors.As(err, &re) {
-			httpError(w, re.status, re.msg)
-			return
-		}
-		httpError(w, http.StatusInternalServerError, err.Error())
-		return
+		return nil, uuid.Nil, err
 	}
 	sizing, err := fitToModel(&req, ctxLen, set.Worker.MaxTokens, reference)
 	if err != nil {
-		httpError(w, http.StatusBadRequest, err.Error())
-		return
+		return nil, uuid.Nil, badRequest("%s", err.Error())
 	}
 	if req.Check != nil {
 		set.CheckAnswer = *req.Check
@@ -194,27 +208,24 @@ func (s *Server) createTree(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Search {
 		if !s.SearchEnabled {
-			httpError(w, http.StatusBadRequest, "web search is not configured on this server (set SEARCH_URL to a SearXNG instance)")
-			return
+			return nil, uuid.Nil, badRequest("web search is not configured on this server (set SEARCH_URL or EXA_API_KEY)")
 		}
 		set.Search = true
 	}
 
-	started, err := agent.StartTree(r.Context(), s.db, s.river, agent.TreeRequest{
+	started, err := agent.StartTree(ctx, s.db, s.river, agent.TreeRequest{
 		Prompt: req.Prompt, Priority: req.Priority, Settings: set, Document: req.Document, Chunks: req.Chunks, Parts: req.Parts,
-		MaxPartTokens: req.MaxPartTokens, PartMaxWords: req.PartMaxWords, Context: reference,
+		MaxPartTokens: req.MaxPartTokens, PartMaxWords: req.PartMaxWords, Context: reference, History: history,
 	})
 	if errors.Is(err, agent.ErrTooManyParts) {
-		httpError(w, http.StatusBadRequest, err.Error())
-		return
+		return nil, uuid.Nil, badRequest("%s", err.Error())
 	}
 	if err != nil {
 		s.log.Error("start tree", "err", err)
-		httpError(w, http.StatusInternalServerError, "could not start tree")
-		return
+		return nil, uuid.Nil, errors.New("could not start tree")
 	}
 	root := started.Root
-	if err := s.bus.Publish(r.Context(), events.Event{Type: events.TreeCreated, TreeID: root.TreeID, NodeID: root.ID, Text: truncate(req.Prompt, 200)}); err != nil {
+	if err := s.bus.Publish(ctx, events.Event{Type: events.TreeCreated, TreeID: root.TreeID, NodeID: root.ID, Text: truncate(req.Prompt, 200)}); err != nil {
 		s.log.Warn("publish tree.created", "err", err)
 	}
 	if len(started.Children) > 0 {
@@ -222,7 +233,7 @@ func (s *Server) createTree(w http.ResponseWriter, r *http.Request) {
 		for i, c := range started.Children {
 			kids[i] = events.Child{ID: c.ID, Title: c.Title, Role: c.Role, Prompt: truncate(c.Prompt, 400)}
 		}
-		_ = s.bus.Publish(r.Context(), events.Event{Type: events.NodeSplit, TreeID: root.TreeID, NodeID: root.ID, Role: string(agent.RolePlan),
+		_ = s.bus.Publish(ctx, events.Event{Type: events.NodeSplit, TreeID: root.TreeID, NodeID: root.ID, Role: string(agent.RolePlan),
 			Text: splitReason(req, len(kids)), Children: kids})
 	}
 	resp := map[string]any{
@@ -236,7 +247,14 @@ func (s *Server) createTree(w http.ResponseWriter, r *http.Request) {
 		resp["fetched"] = fetched
 		s.log.Info("tree started with fetched pages", "tree", root.TreeID, "pages", len(fetched), "context_chars", len(reference))
 	}
-	writeJSON(w, http.StatusCreated, resp)
+	return resp, root.TreeID, nil
+}
+
+func (s *Server) contextLength(model string) int {
+	if m, ok := s.registry.Get(model); ok {
+		return m.ContextLength
+	}
+	return 0
 }
 
 func (s *Server) listTrees(w http.ResponseWriter, r *http.Request) {

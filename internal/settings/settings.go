@@ -56,6 +56,15 @@ type Settings struct {
 	// Context is a tree's reference material, sent to every agent. It is
 	// stored with the tree (agent_tree.context), not in the settings JSON.
 	Context string `json:"-"`
+	// History is the conversation before this tree's prompt (chat), oldest
+	// first; the root agent sees it. Stored in agent_tree.history.
+	History []Turn `json:"-"`
+}
+
+// Turn is one message of a conversation.
+type Turn struct {
+	Role    string `json:"role"` // user | assistant
+	Content string `json:"content"`
 }
 
 const (
@@ -199,7 +208,14 @@ func SnapshotTree(ctx context.Context, db store.DBTX, treeID uuid.UUID, prompt s
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(ctx, `INSERT INTO agent_tree (id, prompt, config, context) VALUES ($1, $2, $3, $4)`, treeID, prompt, raw, s.Context)
+	history, err := json.Marshal(s.History)
+	if err != nil {
+		return err
+	}
+	if s.History == nil {
+		history = []byte("[]")
+	}
+	_, err = db.Exec(ctx, `INSERT INTO agent_tree (id, prompt, config, context, history) VALUES ($1, $2, $3, $4, $5)`, treeID, prompt, raw, s.Context, history)
 	return err
 }
 
@@ -208,8 +224,9 @@ func ForTree(ctx context.Context, db store.DBTX, treeID uuid.UUID) (*Settings, e
 	var (
 		raw       []byte
 		reference string
+		history   []byte
 	)
-	err := db.QueryRow(ctx, `SELECT config, context FROM agent_tree WHERE id = $1`, treeID).Scan(&raw, &reference)
+	err := db.QueryRow(ctx, `SELECT config, context, history FROM agent_tree WHERE id = $1`, treeID).Scan(&raw, &reference, &history)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
@@ -221,5 +238,8 @@ func ForTree(ctx context.Context, db store.DBTX, treeID uuid.UUID) (*Settings, e
 		return nil, fmt.Errorf("decode tree settings: %w", err)
 	}
 	s.Context = reference
+	if err := json.Unmarshal(history, &s.History); err != nil {
+		return nil, fmt.Errorf("decode tree history: %w", err)
+	}
 	return &s, nil
 }

@@ -6,7 +6,14 @@ _Last updated: 2026-10-12_
 **Deployed and live** on the user's cluster: namespace `agent-spawner`, console at http://192.168.1.64:30880 (NodePort 30880 on any node). See deployment.md for every detail. Next steps depend on the user.
 
 ## Recent changes
-### 2026-10-18: auto document chunks (0.1.38, branch `feat/auto-chunks`)
+### 2026-10-18: Chat tab, a conversational agent (0.1.42, branch `feat/chat`)
+- Nav: Chat before Runs (Runs stays the default route). Migration 009: `chat_conversation` (owner, title), `chat_message` (role, content, tree_id), `agent_tree.history` jsonb.
+- Each reply is a run: `settings.History []Turn` (stored in agent_tree.history) — the root exec gets the turns as real chat messages; planner, merge and the search query writer get a "Conversation so far" block. Chat defaults to max_depth 0 (one agent); "Agent pool" (deep) uses the saved depth.
+- API `internal/api/chat.go`: list/create/get/rename/delete chats, POST messages (409 while a reply is running); history = done exchanges only, long replies shortened (6,000 chars), newest kept within ~30% of the worker model's context (`history_note` when trimmed); delete cancels + purges each reply's run. `createTree` refactored into `startRun` (shared). Chat fetch is soft: an unopenable link becomes "=== LINKS THAT COULD NOT BE OPENED ===" in the reference and an entry with `error` in `fetched`.
+- Auth: middleware checks Enabled per request (the first account now turns auth on without a restart — previously decided at startup) and records `auth.Principal(ctx)` (account email or token:<id>); chats are scoped to it.
+- Console `chatView`: conversation list, streaming bubbles (root deltas; status for search/agents/merge; a repeated root node.started resets the text), Markdown on completion, View run / Copy, Stop, Delete; mobile fixes (grid minmax(0,1fr), tables scroll in their box).
+- Verified (Playwright on the cluster): remembers across turns (Ada/bees), ~0.5-3 s replies, Markdown list, reload restores, delete → chat and runs 404, dead link → reply still sent, no overflow at 390 px, no console errors.
+### 2026-10-18: auto document chunks (0.1.38, merged via PR #18)
 - Analysis of run 1c053de1 (explain systemPatterns.md, 9.6k chars ≈ 2.4k tokens): the console's Chunks default (4) split it into 3 parts + llm merge: 104 s, 65% in the merge (one stream rewrote 3,504 tokens at 53 tok/s), 7,040 tokens generated in total. Infra fine (0.5 s queue, ~1 s TTFT, no overflows).
 - Fix: `agent.AutoChunks` (moved from mcpserver; ≤6k tokens → 1, ≤30k → 4, else ceil(t/7500) ≤ 16) applied by the API when chunks is 0/omitted (`fitToModel`, with a `sizing` note); console Chunks box empty = auto; explicit numbers kept.
 - Rerun of the same task on auto: 1 agent, 26.5 s (4× faster), 1,304 tokens; the answer is shorter (5.8k vs 15k chars) since there is no merge expanding it.

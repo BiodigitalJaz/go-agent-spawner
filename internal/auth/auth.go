@@ -318,13 +318,12 @@ func Public(path string) bool {
 	return !strings.HasPrefix(path, "/v1/") && !strings.HasPrefix(path, "/debug/") && path != "/mcp" && !strings.HasPrefix(path, "/mcp/")
 }
 
-// Middleware enforces authentication on every non-public path.
+// Middleware enforces authentication on every non-public path, and records
+// who is asking (Principal). Whether authentication is on is checked per
+// request: creating the first account turns it on without a restart.
 func (a *Authenticator) Middleware(next http.Handler) http.Handler {
-	if !a.Enabled() {
-		return next
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if Public(r.URL.Path) {
+		if !a.Enabled() || Public(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -337,8 +336,34 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "cross-site request refused"})
 			return
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, a.principal(r))))
 	})
+}
+
+type principalKey struct{}
+
+// Principal identifies who made an authenticated request: the account's
+// email, "token:<id>" for a token, or "" when authentication is off.
+func Principal(ctx context.Context) string {
+	p, _ := ctx.Value(principalKey{}).(string)
+	return p
+}
+
+func (a *Authenticator) principal(r *http.Request) string {
+	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+		if id, ok := a.validToken(strings.TrimPrefix(h, "Bearer ")); ok {
+			return "token:" + id
+		}
+	}
+	if c, err := r.Cookie(CookieName); err == nil {
+		if u := a.sessionUser(r.Context(), c.Value); u != nil {
+			return u.Email
+		}
+		if parts := strings.Split(c.Value, "."); len(parts) == 4 && parts[0] == "v1" {
+			return "token:" + parts[2]
+		}
+	}
+	return ""
 }
 
 func unsafeMethod(m string) bool {

@@ -198,13 +198,14 @@ function route() {
   const [, tab = "runs", id] = (location.hash || "#/runs").split("/");
   for (const a of document.querySelectorAll(".tabs a")) a.classList.toggle("active", a.dataset.tab === tab);
   const root = $("#app");
-  if (tab === "runs" && app.view?.name === "runs") {
+  if ((tab === "runs" || tab === "chat") && app.view?.name === tab) {
     app.view.select(id || null);
     return;
   }
   app.view?.destroy?.();
   root.replaceChildren();
-  if (tab === "settings") app.view = settingsView(root);
+  if (tab === "chat") app.view = chatView(root, id || null);
+  else if (tab === "settings") app.view = settingsView(root);
   else if (tab === "models") app.view = modelsView(root);
   else app.view = runsView(root, id || null);
 }
@@ -1005,6 +1006,210 @@ const ROLES = [
     desc: "Merges the workers' results into one answer for the parent task.",
     note: "Receives the original task plus every child's result or failure." },
 ];
+
+// =====================================================================
+// Chat view: a conversational agent. Each reply is a run whose root agent
+// sees the conversation so far; it streams here like any run.
+// =====================================================================
+function chatView(root, initialId) {
+  const listEl = h("div", { class: "chat-list", role: "list" });
+  const main = h("section", { class: "chat-main" });
+  const newBtn = h("button", { class: "btn primary chat-new", onclick: () => { location.hash = "#/chat"; } }, "+ New chat");
+  root.append(h("div", { class: "chat" }, h("aside", { class: "sidebar" }, h("div", { class: "chat-side-head" }, newBtn), listEl), main));
+
+  let chats = [];
+  let current = null;   // conversation id
+  let stream = null;    // {es, tree, bubble} of the reply being written
+  let destroyed = false;
+
+  async function loadList() {
+    try { chats = (await api("GET", "/v1/chats")).chats; } catch (e) { toast(e.message, true); }
+    renderList();
+  }
+  function renderList() {
+    if (!chats.length) { listEl.replaceChildren(h("div", { class: "empty" }, "No conversations yet.")); return; }
+    listEl.replaceChildren(...chats.map((c) => h("a", { class: `chat-item${c.id === current ? " selected" : ""}`, href: `#/chat/${c.id}`, role: "listitem" },
+      h("div", { class: "title" }, c.title || "New chat"),
+      h("div", { class: "faint" }, fmtAgo(new Date(c.updated_at).getTime())))));
+  }
+
+  // ---- thread ----
+  const thread = h("div", { class: "chat-thread", "aria-live": "polite" });
+  const input = h("textarea", { placeholder: "Message the agent…  (Enter to send, Shift+Enter for a new line)", "aria-label": "Message", rows: 3 });
+  const fetchBox = h("input", { type: "checkbox", checked: true, "aria-label": "Fetch links" });
+  const searchBox = h("input", { type: "checkbox", "aria-label": "Search the web" });
+  const deepBox = h("input", { type: "checkbox", "aria-label": "Agent pool" });
+  const searchLabel = h("label", { class: "check", hidden: !app.searchEnabled, title: "Search the web first and answer from the results, with sources" }, searchBox, " Search the web");
+  const send = h("button", { class: "btn primary", onclick: () => submit() }, "Send");
+  const stop = h("button", { class: "btn danger", hidden: true, onclick: () => stopReply() }, "Stop");
+  const title = h("h2", { class: "chat-title" });
+  const del = h("button", { class: "btn small danger", title: "Delete this conversation and its runs", onclick: () => deleteChat() }, "Delete");
+  const head = h("div", { class: "chat-head" }, title, del);
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit(); } });
+  main.append(head, thread, h("div", { class: "chat-compose" }, input,
+    h("div", { class: "chat-opts" },
+      h("label", { class: "check", title: "Read pages linked in your message" }, fetchBox, " Fetch links"),
+      searchLabel,
+      h("label", { class: "check", title: "Let the planner split the reply across parallel agents (slower; for big asks)" }, deepBox, " Agent pool"),
+      h("span", { class: "grow" }), stop, send)));
+
+  function bubble(role) {
+    const body = h("div", { class: "bubble-body" });
+    const status = h("div", { class: "bubble-status faint" });
+    const foot = h("div", { class: "bubble-foot" });
+    const el = h("div", { class: `bubble ${role}` }, body, status, foot);
+    thread.append(el);
+    return { el, body, status, foot, text: "" };
+  }
+  function showReply(b, m) {
+    if (m.status === "failed") { b.el.classList.add("error"); b.body.textContent = m.error || "The reply failed."; }
+    else if (m.status === "cancelled") { b.body.textContent = m.content || ""; setText(b.status, "Stopped."); }
+    else { b.body.replaceChildren(renderMarkdown(m.content || "")); b.body.classList.add("out", "md"); }
+    if (m.tree_id) {
+      b.foot.replaceChildren(
+        h("a", { href: `#/runs/${m.tree_id}`, class: "faint" }, "View run"),
+        h("button", { class: "link", onclick: () => navigator.clipboard?.writeText(m.content || "").then(() => toast("Copied")) }, "Copy"));
+    }
+  }
+  function scrollDown() { thread.scrollTop = thread.scrollHeight; }
+
+  async function open(id) {
+    closeStream();
+    current = id;
+    renderList();
+    thread.replaceChildren();
+    title.textContent = "New chat";
+    del.hidden = !id;
+    if (!id) { input.focus(); return; }
+    let d;
+    try { d = await api("GET", `/v1/chats/${id}`); } catch (e) {
+      thread.replaceChildren(h("div", { class: "empty" }, e.status === 404 ? "Conversation not found." : e.message));
+      return;
+    }
+    if (destroyed || current !== id) return;
+    title.textContent = d.chat.title || "New chat";
+    for (const m of d.messages) {
+      const b = bubble(m.role);
+      if (m.role === "user") { b.body.textContent = m.content; continue; }
+      if (m.status && !TERMINAL.has(m.status)) follow(m.tree_id, b);
+      else showReply(b, m);
+    }
+    scrollDown();
+    input.focus();
+  }
+
+  // follow streams a reply: deltas of the root agent, plus status notes.
+  function follow(tree, b) {
+    closeStream();
+    stop.hidden = false;
+    send.disabled = true;
+    setText(b.status, "Thinking…");
+    const es = new EventSource(`/v1/trees/${tree}/events`);
+    stream = { es, tree, b };
+    let agents = 0, finished = 0, phase = "";
+    const root = (e) => e.node_id === tree;
+    es.addEventListener("node.started", (m) => {
+      const e = JSON.parse(m.data);
+      if (!root(e)) return;
+      if (phase === e.role) { b.text = ""; b.body.textContent = ""; } // a retry or the rules check rewrites the reply
+      phase = e.role;
+      if (e.role === "reduce") setText(b.status, "Combining the agents' results…");
+    });
+    es.addEventListener("thinking", (m) => {
+      const e = JSON.parse(m.data);
+      if (!root(e)) return;
+      const line = (e.text || "").trim().split("\n").filter(Boolean).pop();
+      if (line && /search|query|quer|read|check/i.test(line)) setText(b.status, line);
+    });
+    es.addEventListener("node.split", (m) => {
+      const e = JSON.parse(m.data);
+      agents = (e.children || []).length;
+      setText(b.status, `${agents} agents working…`);
+    });
+    es.addEventListener("node.done", (m) => {
+      const e = JSON.parse(m.data);
+      if (!root(e) && agents) setText(b.status, `${++finished} of ${agents} agents finished…`);
+    });
+    es.addEventListener("delta", (m) => {
+      const e = JSON.parse(m.data);
+      if (!root(e)) return;
+      b.text += e.text || "";
+      b.body.textContent = b.text;
+      if (!/Combining/.test(b.status.textContent)) setText(b.status, "");
+      scrollDown();
+    });
+    const finish = async (status, text, truncated) => {
+      closeStream();
+      let content = text;
+      if (truncated) { try { content = (await api("GET", `/v1/trees/${tree}`)).nodes.find((n) => n.id === tree)?.output || text; } catch {} }
+      setText(b.status, "");
+      showReply(b, { status, content, error: text, tree_id: tree });
+      scrollDown();
+      loadList();
+    };
+    es.addEventListener("tree.done", (m) => { const e = JSON.parse(m.data); finish("done", e.text, e.text_truncated); });
+    es.addEventListener("tree.failed", (m) => finish("failed", JSON.parse(m.data).text));
+    es.addEventListener("tree.cancelled", () => finish("cancelled", b.text));
+  }
+  function closeStream() {
+    if (stream) { stream.es.close(); stream = null; }
+    stop.hidden = true;
+    send.disabled = false;
+  }
+  async function stopReply() {
+    if (!stream) return;
+    try { await api("DELETE", `/v1/trees/${stream.tree}`); } catch (e) { toast(e.message, true); }
+  }
+
+  async function submit() {
+    const content = input.value.trim();
+    if (!content || send.disabled) return;
+    send.disabled = true;
+    try {
+      let id = current;
+      if (!id) {
+        id = (await api("POST", "/v1/chats", {})).id;
+        current = id;
+        history.replaceState(null, "", `#/chat/${id}`); // no re-render: stay in this thread
+        del.hidden = false;
+      }
+      const res = await api("POST", `/v1/chats/${id}/messages`, { content, fetch_urls: fetchBox.checked, search: searchBox.checked, deep: deepBox.checked });
+      input.value = "";
+      const ub = bubble("user");
+      ub.body.textContent = content;
+      if (res.history_note) toast(res.history_note);
+      const dead = (res.fetched || []).filter((p) => p.error);
+      if (dead.length) toast(`Couldn't open ${dead.map((p) => p.url).join(", ")}; the agent was told.`, true);
+      if (title.textContent === "New chat") title.textContent = content.length > 60 ? content.slice(0, 60) + "…" : content;
+      const ab = bubble("assistant");
+      scrollDown();
+      follow(res.tree_id, ab);
+      loadList();
+    } catch (e) {
+      toast(e.message, true);
+      send.disabled = false;
+    }
+  }
+
+  async function deleteChat() {
+    if (!current || !confirm("Delete this conversation and the runs of its replies? This cannot be undone.")) return;
+    try {
+      await api("DELETE", `/v1/chats/${current}`);
+      toast("Conversation deleted");
+      location.hash = "#/chat";
+      loadList();
+    } catch (e) { toast(e.message, true); }
+  }
+
+  loadList();
+  open(initialId);
+  return {
+    name: "chat",
+    select: (id) => { if (id !== current) open(id); },
+    onModels: () => { searchLabel.hidden = !app.searchEnabled; },
+    destroy() { destroyed = true; closeStream(); },
+  };
+}
 
 function settingsView(root) {
   let loaded = null;   // {version, settings, defaults}

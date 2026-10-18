@@ -54,7 +54,8 @@ type fakeLLM struct {
 	// searcher, when set, is the worker's web search backend.
 	searcher *fetch.Multi
 	mu       sync.Mutex
-	prompts  []string // every user message received
+	prompts  []string   // every user message received
+	convs    [][]string // every request's messages as "role: content"
 }
 
 func (f *fakeLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -69,6 +70,11 @@ func (f *fakeLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	system := req.Messages[0].Content
 	f.mu.Lock()
 	f.prompts = append(f.prompts, user)
+	var conv []string
+	for _, m := range req.Messages {
+		conv = append(conv, m.Role+": "+m.Content)
+	}
+	f.convs = append(f.convs, conv)
 	f.mu.Unlock()
 	if f.sharedChars > 0 {
 		size := int64(len(user) + len(system))
@@ -922,6 +928,69 @@ func TestSearchSkippedWhenLinkedPagesCoverTask(t *testing.T) {
 	snap, _ := settings.ForTree(context.Background(), h.db, started.Root.TreeID)
 	if calls.Load() != 0 || strings.Contains(snap.Context, "WEB SEARCH RESULTS") {
 		t.Fatalf("search should be skipped: %d calls; reference:\n%s", calls.Load(), snap.Context)
+	}
+}
+
+func TestChatHistoryReachesTheAgent(t *testing.T) {
+	llm := &fakeLLM{}
+	h := setup(t, llm)
+	set := h.set
+	set.MaxDepth = 0
+	history := []settings.Turn{{Role: "user", Content: "My name is Ada."}, {Role: "assistant", Content: "Nice to meet you, Ada."}}
+	started, err := agent.StartTree(context.Background(), h.db, h.client, agent.TreeRequest{
+		Prompt: "What is my name?", Priority: 1, Settings: set, History: history,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evs := h.collect(t, started.Root.TreeID); evs[len(evs)-1].Type != events.TreeDone {
+		t.Fatal("tree failed")
+	}
+	llm.mu.Lock()
+	defer llm.mu.Unlock()
+	conv := llm.convs[len(llm.convs)-1]
+	if len(conv) != 4 || conv[1] != "user: My name is Ada." || conv[2] != "assistant: Nice to meet you, Ada." || conv[3] != "user: What is my name?" {
+		t.Fatalf("messages sent = %q", conv)
+	}
+	snap, _ := settings.ForTree(context.Background(), h.db, started.Root.TreeID)
+	if len(snap.History) != 2 {
+		t.Fatalf("history not stored with the tree: %+v", snap.History)
+	}
+}
+
+func TestChatStore(t *testing.T) {
+	h := setup(t, &fakeLLM{})
+	ctx := context.Background()
+	c, err := store.CreateConversation(ctx, h.db, "ada@example.com", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := h.set
+	set.MaxDepth = 0
+	started, _ := agent.StartTree(ctx, h.db, h.client, agent.TreeRequest{Prompt: "hello", Priority: 1, Settings: set})
+	h.collect(t, started.Root.TreeID)
+	if _, _, err := store.AddExchange(ctx, h.db, c.ID, "hello", started.Root.TreeID, "hello"); err != nil {
+		t.Fatal(err)
+	}
+	msgs, err := store.ChatMessages(ctx, h.db, c.ID)
+	if err != nil || len(msgs) != 2 || msgs[0].Role != "user" || msgs[1].Role != "assistant" || msgs[1].Status != "done" || msgs[1].Content == "" {
+		t.Fatalf("messages = %+v %v", msgs, err)
+	}
+	if list, _ := store.ListConversations(ctx, h.db, "ada@example.com", 10); len(list) != 1 || list[0].Title != "hello" || list[0].Messages != 2 {
+		t.Fatalf("list = %+v", list)
+	}
+	if _, err := store.GetConversation(ctx, h.db, c.ID, "someone-else"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("another owner must not see it: %v", err)
+	}
+	if _, err := store.DeleteConversation(ctx, h.db, c.ID, "someone-else"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("another owner must not delete it: %v", err)
+	}
+	trees, err := store.DeleteConversation(ctx, h.db, c.ID, "ada@example.com")
+	if err != nil || len(trees) != 1 || trees[0] != started.Root.TreeID {
+		t.Fatalf("delete returned %v %v", trees, err)
+	}
+	if msgs, _ := store.ChatMessages(ctx, h.db, c.ID); len(msgs) != 0 {
+		t.Fatal("messages must go with the conversation")
 	}
 }
 

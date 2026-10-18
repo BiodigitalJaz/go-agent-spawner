@@ -75,6 +75,25 @@ func withReference(set *settings.Settings, task string) string {
 		"--- BEGIN REFERENCE ---\n" + set.Context + "\n--- END REFERENCE ---\n\n" + task
 }
 
+// conversationBlock renders the conversation before a root's prompt as
+// text, for agents that take it as context rather than as chat turns.
+func conversationBlock(set *settings.Settings, node *store.Node) string {
+	if node.ParentID != nil || len(set.History) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("Conversation so far (the latest message follows):\n")
+	for _, t := range set.History {
+		who := "User"
+		if t.Role == "assistant" {
+			who = "Assistant"
+		}
+		fmt.Fprintf(&b, "%s: %s\n\n", who, t.Content)
+	}
+	b.WriteString("Latest message:\n")
+	return b.String()
+}
+
 func planMessages(set *settings.Settings, node *store.Node, canNest bool) []llm.Message {
 	rules := planRules(set.MaxChildren, canNest)
 	if strings.TrimSpace(set.Context) != "" {
@@ -84,15 +103,24 @@ func planMessages(set *settings.Settings, node *store.Node, canNest bool) []llm.
 	}
 	return []llm.Message{
 		{Role: "system", Content: strings.TrimSpace(set.Planner.Directive) + "\n\n" + rules},
-		{Role: "user", Content: withReference(set, node.Prompt)},
+		{Role: "user", Content: withReference(set, conversationBlock(set, node)+node.Prompt)},
 	}
 }
 
+// execMessages gives a chat reply's root agent the earlier conversation as
+// real turns, then the latest message.
 func execMessages(set *settings.Settings, node *store.Node) []llm.Message {
-	return []llm.Message{
-		{Role: "system", Content: set.Worker.Directive},
-		{Role: "user", Content: withReference(set, node.Prompt)},
+	msgs := []llm.Message{{Role: "system", Content: set.Worker.Directive}}
+	if node.ParentID == nil {
+		for _, t := range set.History {
+			role := "user"
+			if t.Role == "assistant" {
+				role = "assistant"
+			}
+			msgs = append(msgs, llm.Message{Role: role, Content: t.Content})
+		}
 	}
+	return append(msgs, llm.Message{Role: "user", Content: withReference(set, node.Prompt)})
 }
 
 // childItems turns a node's children into merge inputs. Token counts come
@@ -125,7 +153,7 @@ func childItems(children []*store.Node) []mergeItem {
 func reduceMessages(set *settings.Settings, node *store.Node, items []mergeItem) []llm.Message {
 	return []llm.Message{
 		{Role: "system", Content: set.Reducer.Directive},
-		{Role: "user", Content: withReference(set, fmt.Sprintf("Original task:\n%s\n\nResults from parallel workers:\n%s", node.Prompt, itemsBlock(items)))},
+		{Role: "user", Content: withReference(set, fmt.Sprintf("Original task:\n%s%s\n\nResults from parallel workers:\n%s", conversationBlock(set, node), node.Prompt, itemsBlock(items)))},
 	}
 }
 
