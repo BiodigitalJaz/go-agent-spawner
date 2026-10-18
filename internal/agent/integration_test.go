@@ -896,6 +896,35 @@ func TestDeleteAccount(t *testing.T) {
 	}
 }
 
+// A task about a page it links to: the page is already fetched, so the
+// search step skips searching instead of adding unrelated look-alikes.
+func TestSearchSkippedWhenLinkedPagesCoverTask(t *testing.T) {
+	var calls atomic.Int32
+	searx := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		fmt.Fprint(w, `{"results":[{"url":"https://antrados.cz/","title":"Look-alike","content":"x"}]}`)
+	}))
+	defer searx.Close()
+	llm := &fakeLLM{searcher: fetch.NewMulti(slog.New(slog.NewTextHandler(io.Discard, nil)), fetch.NewSearcher(searx.URL, ""))}
+	h := setup(t, llm)
+	set := h.set
+	set.Search, set.MaxDepth, set.CheckAnswer = true, 0, false
+	ref := agent.LinkedPagesMarker + " (fetched from the links in the task; the task is about these) ===\n\n## Page fetched from https://antrado.com/terms.html\nTitle: Terms\n\nThe agreement."
+	started, err := agent.StartTree(context.Background(), h.db, h.client, agent.TreeRequest{
+		Prompt: "summarize https://antrado.com/terms.html", Priority: 1, Settings: set, Context: ref,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evs := h.collect(t, started.Root.TreeID); evs[len(evs)-1].Type != events.TreeDone {
+		t.Fatal("tree failed")
+	}
+	snap, _ := settings.ForTree(context.Background(), h.db, started.Root.TreeID)
+	if calls.Load() != 0 || strings.Contains(snap.Context, "WEB SEARCH RESULTS") {
+		t.Fatalf("search should be skipped: %d calls; reference:\n%s", calls.Load(), snap.Context)
+	}
+}
+
 func TestPurgeTreeRemovesEveryRecord(t *testing.T) {
 	h := setup(t, &fakeLLM{split: []string{"one", "two"}})
 	ctx := context.Background()

@@ -13,6 +13,10 @@ import (
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/settings"
 )
 
+// linkedPagesMarker heads the pages fetched from the task's own links; the
+// search step looks for it (agent.LinkedPagesMarker).
+const linkedPagesMarker = agent.LinkedPagesMarker
+
 var urlRE = regexp.MustCompile(`https?://[^\s<>"'(){}\[\]]+`)
 
 // promptURLs returns the distinct web links in a prompt.
@@ -91,10 +95,10 @@ func (s *Server) reference(ctx context.Context, req *createRequest, set settings
 	// about, the supplied text is what the answer must respect (without the
 	// labels, models reviewed the guidelines instead of the page).
 	room := (maxChars - len(userCtx) - 200) / len(pages)
+	// Linked pages are always labelled: they are what the task is about, and
+	// a later web search adds background that must not be mistaken for them.
 	var b strings.Builder
-	if userCtx != "" {
-		b.WriteString("=== MATERIAL UNDER REVIEW (fetched from the links in the task) ===\n\n")
-	}
+	b.WriteString(linkedPagesMarker + " (fetched from the links in the task; the task is about these) ===\n\n")
 	report := make([]fetchedPage, len(pages))
 	for i, p := range pages {
 		text, cut := p.Text, false

@@ -79,7 +79,8 @@ func planMessages(set *settings.Settings, node *store.Node, canNest bool) []llm.
 	rules := planRules(set.MaxChildren, canNest)
 	if strings.TrimSpace(set.Context) != "" {
 		rules += "\n\nEvery worker also receives the reference material below, so subtask prompts may refer to it." +
-			" When the reference has both material under review and guidelines to respect, each subtask reviews the material against the guidelines and proposes concrete changes to the material; subtasks never evaluate, praise or restate the guidelines themselves."
+			" When the reference has both pages linked in the task and guidelines to respect, each subtask reviews the linked pages against the guidelines and proposes concrete changes to them; subtasks never evaluate, praise or restate the guidelines themselves." +
+			" Web search results, when present, are background only: never mistake them for the pages linked in the task."
 	}
 	return []llm.Message{
 		{Role: "system", Content: strings.TrimSpace(set.Planner.Directive) + "\n\n" + rules},

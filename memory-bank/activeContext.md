@@ -6,7 +6,11 @@ _Last updated: 2026-10-12_
 **Deployed and live** on the user's cluster: namespace `agent-spawner`, console at http://192.168.1.64:30880 (NodePort 30880 on any node). See deployment.md for every detail. Next steps depend on the user.
 
 ## Recent changes
-### 2026-10-18: NATS size limit, part reservations, account deletion (0.1.36, branch `feat/limits-and-accounts`)
+### 2026-10-18: linked pages vs web search (0.1.37, branch `fix/linked-pages-vs-search`)
+- Run 3128b439 ("summarize https://antrado.com/terms.html", search on): the page was fetched (9,034 chars, first in the reference) but search added 4 look-alike pages (antrados.cz translation agency, antrado.de shop); unlabelled, the 9B model said the terms weren't included.
+- Fix: linked pages always under "=== PAGES LINKED IN THE TASK (… the task is about these) ===" (`agent.LinkedPagesMarker`); search section labelled background; the query writer sees the linked page addresses and may return no queries (schema minItems 0) → "Search skipped: the pages linked in the task cover it"; with linked pages, a query-writer error also skips. Without linked pages, behaviour unchanged (falls back to the prompt as the query).
+- Verified: terms summary 12 s, search skipped, accurate (Oklahoma law, Stripe, Robinhood, 12-month liability cap); comparison prompt with a link still searches (stockbrokers.com, IBKR, …) and names real competitors.
+### 2026-10-18: NATS size limit, part reservations, account deletion (0.1.36, merged via PR #16)
 - Events carry at most 64 KiB of text (`events.MaxEventText`): DeltaWriter splits bursts into chunks; other events are cut with `text_truncated` (console refetches the full result from the API; MCP already reads results from the API). Integration test: a 1.35 MB concat result finishes, every event ≤ 64 KiB, the full output is stored.
 - `part_max_words` is stored in the tree's settings snapshot; part agents reserve `words*1.5+128` tokens instead of max_tokens (1024). 48-passage benchmark (3k-token passages, 60 words): avg concurrency 5.7 -> 7.7 (peak 10 timestamps), 0 overflows; wall 66.3 s vs 58.0 s direct today (14%; parts phase 62.6 s, 8%). Direct was slower today than the 50.3 s of 2026-10-13.
 - `spawner user delete <email>`; refuses the last active account when AUTH_TOKENS is empty (would disable auth). `PGUsers.Delete`, `ActiveCountExcept`.
