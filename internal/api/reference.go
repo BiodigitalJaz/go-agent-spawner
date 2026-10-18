@@ -60,7 +60,7 @@ func (s *Server) reference(ctx context.Context, req *createRequest, set settings
 		return userCtx, nil, nil
 	}
 	if !req.FetchURLs {
-		if userCtx == "" && req.Document == "" && len(req.Parts) == 0 {
+		if userCtx == "" && req.Document == "" && len(req.Parts) == 0 && !req.Search {
 			return "", nil, &requestError{http.StatusBadRequest, fmt.Sprintf(
 				"the prompt links to %s, but agents cannot open web pages. Turn on fetch_urls (\"Fetch linked pages\" in the console) or pass the content as context or document", urls[0])}
 		}

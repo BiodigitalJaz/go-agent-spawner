@@ -39,6 +39,8 @@ type Server struct {
 	discovery *discovery.Client
 	defaults  settings.Settings
 	workers   *workerRegistry
+	// SearchEnabled: the workers have a search backend (SEARCH_URL).
+	SearchEnabled bool
 }
 
 func New(log *slog.Logger, db *pgxpool.Pool, client *river.Client[pgx.Tx], bus *events.Bus, registry *models.Registry, defaults settings.Settings) *Server {
@@ -100,6 +102,9 @@ type createRequest struct {
 	// Check overrides the check_answer setting for this run: a rules check
 	// of the final answer against the reference material.
 	Check *bool `json:"check,omitempty"`
+	// Search runs a web search before planning and gives every agent the
+	// results (needs SEARCH_URL on the server).
+	Search bool `json:"search,omitempty"`
 }
 
 func (s *Server) createTree(w http.ResponseWriter, r *http.Request) {
@@ -177,6 +182,18 @@ func (s *Server) createTree(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Check != nil {
 		set.CheckAnswer = *req.Check
+	}
+	// The rules check is for rules the requester supplies; fetched pages and
+	// search results are material, not rules.
+	if strings.TrimSpace(req.Context) == "" {
+		set.CheckAnswer = false
+	}
+	if req.Search {
+		if !s.SearchEnabled {
+			httpError(w, http.StatusBadRequest, "web search is not configured on this server (set SEARCH_URL to a SearXNG instance)")
+			return
+		}
+		set.Search = true
 	}
 
 	started, err := agent.StartTree(r.Context(), s.db, s.river, agent.TreeRequest{
@@ -334,10 +351,11 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version":    st.Version,
-		"settings":   st.Settings,
-		"updated_at": st.UpdatedAt,
-		"defaults":   s.defaults,
+		"version":        st.Version,
+		"settings":       st.Settings,
+		"updated_at":     st.UpdatedAt,
+		"defaults":       s.defaults,
+		"search_enabled": s.SearchEnabled,
 	})
 }
 

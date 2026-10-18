@@ -36,6 +36,7 @@ import (
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/backend"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/config"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/events"
+	"github.com/BiodigitalJaz/go-agent-spawner/internal/fetch"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/mcpserver"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/models"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/settings"
@@ -134,6 +135,10 @@ func run(mode string) error {
 		DeltaInterval: cfg.DeltaInterval,
 		JobTimeout:    cfg.JobTimeout,
 	}
+	if cfg.SearchURL != "" {
+		agentCfg.Searcher = fetch.NewSearcher(cfg.SearchURL, cfg.SearchCategories)
+		log.Info("web search enabled", "url", cfg.SearchURL)
+	}
 
 	riverCfg := &river.Config{
 		Logger:            log,
@@ -222,6 +227,7 @@ func run(mode string) error {
 	if runAPI {
 		defaults := settings.Defaults(cfg.Backends.Planner, cfg.Backends.Default, cfg.MaxDepth, cfg.MaxChildren)
 		apiSrv := api.New(log, db, client, bus, registry, defaults)
+		apiSrv.SearchEnabled = cfg.SearchURL != ""
 		if err := apiSrv.Start(gctx); err != nil {
 			return err
 		}

@@ -95,6 +95,7 @@ type CreateTree struct {
 	Context       string `json:"context,omitempty"`
 	FetchURLs     bool   `json:"fetch_urls,omitempty"`
 	Check         *bool  `json:"check,omitempty"`
+	Search        bool   `json:"search,omitempty"`
 }
 
 func (c *Client) CreateTree(ctx context.Context, auth string, req CreateTree) (string, error) {

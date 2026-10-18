@@ -162,6 +162,7 @@ async function refreshModels() {
 }
 async function loadSettings() {
   app.settings = await api("GET", "/v1/settings");
+  app.searchEnabled = !!app.settings.search_enabled;
   return app.settings;
 }
 
@@ -325,6 +326,9 @@ function buildComposer() {
   const fetchLabel = h("label", { class: "check", title: "Download the web pages linked in the prompt and give their text to every agent. Agents cannot open links themselves." }, fetchUrls, " Fetch linked pages");
   // Rules check of the final answer against the reference (default from settings).
   const checkAnswer = h("input", { type: "checkbox", checked: app.settings?.settings?.check_answer !== false, "aria-label": "Rules check" });
+  // Web search before planning (only offered when the server has a backend).
+  const searchWeb = h("input", { type: "checkbox", "aria-label": "Search the web" });
+  const searchLabel = h("label", { class: "check", hidden: true, title: "Search the web first (SearXNG) and give every agent the results with their addresses. Agents cannot search on their own." }, searchWeb, " Search the web");
   let checkTouched = false;
   checkAnswer.addEventListener("change", () => { checkTouched = true; });
   const checkLabel = h("label", { class: "check", title: "When there is reference material, check the final answer against it: recommendations that conflict with it are removed or fixed, and the changes are listed." }, checkAnswer, " Rules check");
@@ -336,6 +340,7 @@ function buildComposer() {
       h("option", { value: "" }, s ? `Worker model: ${s.worker.model} (default)` : "Worker model: default"),
       ...app.models.map((m) => h("option", { value: m.name }, `Worker model: ${m.name} — ${m.model}`)));
     model.value = current;
+    searchLabel.hidden = !app.searchEnabled;
     if (s) {
       if (!checkTouched) checkAnswer.checked = s.check_answer !== false;
       depth.placeholder = `depth ${s.max_depth}`;
@@ -355,6 +360,7 @@ function buildComposer() {
     if (reference.value.trim()) body.context = reference.value;
     body.fetch_urls = fetchUrls.checked;
     body.check = checkAnswer.checked;
+    if (searchWeb.checked) body.search = true;
     run.disabled = true;
     try {
       const res = await api("POST", "/v1/trees", body);
@@ -383,7 +389,7 @@ function buildComposer() {
     docBox,
     // Options on one line, then a full-width Run: the sidebar is narrow.
     h("div", { class: "actions" },
-      h("div", { class: "checks" }, fetchLabel, checkLabel),
+      h("div", { class: "checks" }, fetchLabel, checkLabel, searchLabel),
       run,
       h("span", { class: "faint overrides" }, "Overrides apply to this run only")));
   return { el, refreshModels };

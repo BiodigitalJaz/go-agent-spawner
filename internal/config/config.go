@@ -55,6 +55,10 @@ type Config struct {
 	// from a Secret). Empty disables authentication.
 	AuthTokens     []string
 	AuthSessionTTL time.Duration
+	// SearchURL is a SearXNG instance for runs with search on (JSON API);
+	// SearchCategories overrides the categories queried.
+	SearchURL        string
+	SearchCategories string
 }
 
 var modelName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,55}$`)
@@ -83,6 +87,8 @@ func Load() (*Config, error) {
 		EventFileStore:    envBool("EVENT_FILE_STORE", false),
 		AuthTokens:        list(os.Getenv("AUTH_TOKENS")),
 		AuthSessionTTL:    envDur("AUTH_SESSION_TTL", 7*24*time.Hour),
+		SearchURL:         env("SEARCH_URL", ""),
+		SearchCategories:  env("SEARCH_CATEGORIES", ""),
 	}
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")

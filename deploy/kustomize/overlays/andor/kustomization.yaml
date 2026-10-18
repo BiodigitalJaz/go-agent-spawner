@@ -12,12 +12,18 @@ resources:
   - ../../base
 images:
   - name: ghcr.io/biodigitaljaz/agent-spawner
-    newTag: 0.1.29
+    newTag: 0.1.31
 configMapGenerator:
   - name: spawner-backends
     behavior: replace
     files:
       - backends.json
+  # Web search for runs with "Search the web" on: the research-agent
+  # namespace's SearXNG (JSON API).
+  - name: spawner-env
+    behavior: merge
+    literals:
+      - SEARCH_URL=http://searxng.research-agent.svc.cluster.local:8080
 patches:
   - target:
       kind: Service

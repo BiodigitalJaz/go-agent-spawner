@@ -368,3 +368,10 @@ func PurgeTree(ctx context.Context, db DBTX, treeID uuid.UUID) (nodes, jobs int6
 	}
 	return nodes, jobs, nil
 }
+
+// SetTreeContext replaces a tree's reference material (used by the web
+// search step, which adds results before planning).
+func SetTreeContext(ctx context.Context, db DBTX, treeID uuid.UUID, reference string) error {
+	_, err := db.Exec(ctx, `UPDATE agent_tree SET context = $2 WHERE id = $1`, treeID, reference)
+	return err
+}
