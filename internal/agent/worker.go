@@ -44,7 +44,7 @@ type Config struct {
 	DeltaInterval time.Duration
 	JobTimeout    time.Duration
 	// Searcher runs web searches for runs with search on (nil: not configured).
-	Searcher *fetch.Searcher
+	Searcher *fetch.Multi
 }
 
 type Worker struct {

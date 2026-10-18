@@ -71,19 +71,22 @@ func (w *Worker) search(ctx context.Context, t *task, lease *backend.Lease) (*ba
 	// Run the queries, then interleave their results so each query is
 	// represented, dropping duplicate URLs.
 	lists := make([][]fetch.SearchResult, len(q.Queries))
+	notes := make([][]string, len(q.Queries))
 	var wg sync.WaitGroup
 	for i, query := range q.Queries {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			res, err := w.cfg.Searcher.Search(ctx, query)
-			if err != nil {
-				w.log.Warn("search failed", "query", query, "err", err)
-			}
-			lists[i] = res
+			lists[i], notes[i] = w.cfg.Searcher.Search(ctx, query)
 		}()
 	}
 	wg.Wait()
+	problems := map[string]bool{}
+	for _, n := range notes {
+		for _, x := range n {
+			problems[x] = true
+		}
+	}
 	var results []fetch.SearchResult
 	seen := map[string]bool{}
 	for k := 0; len(results) < maxSearchResults; k++ {
@@ -99,12 +102,28 @@ func (w *Worker) search(ctx context.Context, t *task, lease *backend.Lease) (*ba
 			break
 		}
 	}
-	note.Write(fmt.Sprintf("Queries: %s\nFound %d results.\n", strings.Join(q.Queries, " · "), len(results)))
+	cost := 0.0
+	for _, r := range results {
+		cost += r.CostUSD
+	}
+	msg := fmt.Sprintf("Queries (%s): %s\nFound %d results.", strings.Join(w.cfg.Searcher.Names(), " + "), strings.Join(q.Queries, " · "), len(results))
+	if cost > 0 {
+		msg += fmt.Sprintf(" Estimated search cost: $%.4f.", cost)
+	}
+	note.Write(msg + "\n")
+	for p := range problems {
+		note.Write("Note: " + p + "\n")
+	}
 
-	// Read the top pages in full, in parallel; failures are skipped.
+	// Read the top pages in full, in parallel: providers that return page
+	// text (Exa) need no fetch; the rest go through the fetcher's guard.
 	f := fetch.New(w.log.With("tree", t.node.TreeID, "via", "search"), t.set.AllowInternalFetch)
 	pages := make([]*fetch.Page, min(len(results), maxSearchPages))
 	for i := range pages {
+		if strings.TrimSpace(results[i].Text) != "" {
+			pages[i] = &fetch.Page{URL: results[i].URL, Title: results[i].Title, Text: results[i].Text}
+			continue
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

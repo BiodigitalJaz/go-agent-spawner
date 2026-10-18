@@ -51,7 +51,7 @@ type fakeLLM struct {
 	// estimate assumes).
 	charsPerToken float64
 	// searcher, when set, is the worker's web search backend.
-	searcher *fetch.Searcher
+	searcher *fetch.Multi
 	mu       sync.Mutex
 	prompts  []string // every user message received
 }
@@ -763,7 +763,7 @@ func TestWebSearchAddsResultsToReference(t *testing.T) {
 
 	for _, allowInternal := range []bool{true, false} {
 		t.Run(fmt.Sprintf("internal_fetch=%v", allowInternal), func(t *testing.T) {
-			llm := &fakeLLM{searcher: fetch.NewSearcher(searx.URL, "")}
+			llm := &fakeLLM{searcher: fetch.NewMulti(slog.New(slog.NewTextHandler(io.Discard, nil)), fetch.NewSearcher(searx.URL, ""))}
 			h := setup(t, llm)
 			set := h.set
 			set.Search, set.AllowInternalFetch, set.CheckAnswer, set.MaxDepth = true, allowInternal, false, 0

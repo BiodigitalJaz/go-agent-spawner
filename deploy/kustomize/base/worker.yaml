@@ -40,6 +40,11 @@ spec:
             - name: AUTH_TOKENS
               valueFrom:
                 secretKeyRef: {name: spawner-auth, key: tokens, optional: true}
+            # Exa web search (optional): kubectl -n agent-spawner create secret
+            # generic spawner-search --from-literal=exa_api_key=...
+            - name: EXA_API_KEY
+              valueFrom:
+                secretKeyRef: {name: spawner-search, key: exa_api_key, optional: true}
             # Optionally pin this Deployment to a subset of models, e.g. one
             # worker Deployment per GPU pool: WORKER_QUEUES=large
             - name: WORKER_QUEUES
