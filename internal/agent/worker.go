@@ -20,6 +20,7 @@ import (
 
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/backend"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/events"
+	"github.com/BiodigitalJaz/go-agent-spawner/internal/fetch"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/llm"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/settings"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/store"
@@ -42,6 +43,8 @@ type Config struct {
 	Snooze        time.Duration
 	DeltaInterval time.Duration
 	JobTimeout    time.Duration
+	// Searcher runs web searches for runs with search on (nil: not configured).
+	Searcher *fetch.Searcher
 }
 
 type Worker struct {
@@ -133,6 +136,14 @@ func (w *Worker) Work(ctx context.Context, job *river.Job[TaskArgs]) error {
 		w.log.Warn("mark node phase", "node", node.ID, "err", err)
 	}
 
+	// A root with search on searches first (planner job, or a depth-0
+	// worker job); the search uses this lease for its query call, then
+	// re-admits the job with the larger reference.
+	if node.ParentID == nil && set.Search && (a.Role == RolePlan || a.Role == RoleExec) {
+		if lease, err = w.search(ctx, t, lease); err != nil {
+			return w.outcome(ctx, t, err)
+		}
+	}
 	switch a.Role {
 	case RolePlan:
 		if node.Depth >= set.MaxDepth {

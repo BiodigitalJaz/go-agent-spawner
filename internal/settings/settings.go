@@ -45,6 +45,9 @@ type Settings struct {
 	// removed or fixed, and the changes are listed. On by default (no
 	// omitempty, so a saved false is kept).
 	CheckAnswer bool `json:"check_answer"`
+	// Search runs a web search before planning (per run; set from the
+	// request, never saved globally).
+	Search bool `json:"search,omitempty"`
 
 	// Context is a tree's reference material, sent to every agent. It is
 	// stored with the tree (agent_tree.context), not in the settings JSON.
@@ -73,11 +76,11 @@ Split only when:
 - the subtasks are genuinely independent and can run at the same time, and
 - the task is large enough that parallel work beats one focused answer.
 
-Agents cannot browse the web or open files: they see only the task and any reference material provided with it. Do not split a task that depends on content that was not provided (a web page, a file, a document); answer "direct" so the missing content is reported.`
+Agents answer from their own knowledge plus any reference material provided; they cannot browse the web or open files. General questions need no reference material. Only when a task depends on specific content that was not provided (a particular web page, file, document or live data) should you answer "direct" so the missing content is reported instead of split into guesses.`
 
 	DefaultWorkerDirective = `You are a worker agent. Complete the task thoroughly and accurately. Respond with the result only.
 
-Work only from the task text and any reference material provided with it; you cannot browse the web or open files. If the task needs content you were not given (a web page, a file, a document), say so in one line, naming what is missing, and stop. Never guess or describe content you have not seen.`
+Answer from your own knowledge and any reference material provided; general questions need no reference material. You cannot browse the web or open files: if the task depends on specific content that was not included (a particular web page, file, document or live data), say in one line what is missing instead of guessing it. Never invent facts about a page, file or document you have not seen.`
 
 	DefaultReducerDirective = `You synthesize results from parallel worker agents into one complete answer to the original task. Resolve overlaps, and note any gaps left by failed subtasks. Respond with the final answer only: write the answer itself, never a description of the workers, their agreement or this process.
 

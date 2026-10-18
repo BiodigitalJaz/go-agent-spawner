@@ -27,6 +27,7 @@ import (
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/agent"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/backend"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/events"
+	"github.com/BiodigitalJaz/go-agent-spawner/internal/fetch"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/models"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/settings"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/store"
@@ -49,8 +50,10 @@ type fakeLLM struct {
 	// characters / charsPerToken (dense text tokenizes below the 4 the
 	// estimate assumes).
 	charsPerToken float64
-	mu            sync.Mutex
-	prompts       []string // every user message received
+	// searcher, when set, is the worker's web search backend.
+	searcher *fetch.Searcher
+	mu       sync.Mutex
+	prompts  []string // every user message received
 }
 
 func (f *fakeLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -201,6 +204,7 @@ func setup(t *testing.T, llm *fakeLLM) *harness {
 		AcquireWait: 200 * time.Millisecond, Snooze: 50 * time.Millisecond,
 		DeltaInterval: 20 * time.Millisecond, JobTimeout: 30 * time.Second,
 	}
+	cfg.Searcher = llm.searcher
 	workers := river.NewWorkers()
 	river.AddWorker(workers, agent.NewWorker(cfg, log, db, pool, bus))
 	client, err := river.NewClient(riverpgxv5.New(db), &river.Config{
@@ -737,6 +741,75 @@ func TestRulesCheckOfFinalAnswer(t *testing.T) {
 				t.Fatalf("root stats.checked = %+v, want %v", stats, c.wantCheck)
 			}
 		})
+	}
+}
+
+func TestWebSearchAddsResultsToReference(t *testing.T) {
+	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, "<title>Ember Knight</title><h1>Ember Knight</h1><p>A warrior travels with a tiny dragon companion that follows him.</p>")
+	}))
+	defer page.Close()
+	var queries []string
+	var qmu sync.Mutex
+	searx := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		qmu.Lock()
+		queries = append(queries, r.URL.Query().Get("q")+" | "+r.URL.Query().Get("categories"))
+		qmu.Unlock()
+		fmt.Fprintf(w, `{"results":[{"url":%q,"title":"Ember Knight on Steam","content":"warrior with a dragon pet","engines":["duckduckgo"]},{"url":%q,"title":"Gone","content":"x"}]}`,
+			page.URL+"/game", page.URL+"/missing-but-same-host")
+	}))
+	defer searx.Close()
+
+	for _, allowInternal := range []bool{true, false} {
+		t.Run(fmt.Sprintf("internal_fetch=%v", allowInternal), func(t *testing.T) {
+			llm := &fakeLLM{searcher: fetch.NewSearcher(searx.URL, "")}
+			h := setup(t, llm)
+			set := h.set
+			set.Search, set.AllowInternalFetch, set.CheckAnswer, set.MaxDepth = true, allowInternal, false, 0
+			started, err := agent.StartTree(context.Background(), h.db, h.client, agent.TreeRequest{
+				Prompt: "Find Steam games where a warrior has a tiny dragon that follows him", Priority: 1, Settings: set,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			evs := h.collect(t, started.Root.TreeID)
+			if last := evs[len(evs)-1]; last.Type != events.TreeDone {
+				t.Fatalf("tree failed: %+v", last)
+			}
+			snap, err := settings.ForTree(context.Background(), h.db, started.Root.TreeID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ref := snap.Context
+			for _, want := range []string{"=== WEB SEARCH RESULTS", "Ember Knight on Steam — " + page.URL + "/game — warrior with a dragon pet"} {
+				if !strings.Contains(ref, want) {
+					t.Fatalf("reference missing %q:\n%s", want, ref)
+				}
+			}
+			// Result pages go through the internal-address guard (the test
+			// server is on loopback).
+			if got := strings.Contains(ref, "tiny dragon companion that follows him"); got != allowInternal {
+				t.Fatalf("page text in reference = %v, want %v", got, allowInternal)
+			}
+			// The answering agent saw the results.
+			llm.mu.Lock()
+			defer llm.mu.Unlock()
+			saw := false
+			for _, p := range llm.prompts {
+				if strings.Contains(p, "--- BEGIN REFERENCE ---") && strings.Contains(p, "Ember Knight on Steam") {
+					saw = true
+				}
+			}
+			if !saw {
+				t.Fatal("the agent did not receive the search results")
+			}
+		})
+	}
+	qmu.Lock()
+	defer qmu.Unlock()
+	if len(queries) == 0 || !strings.Contains(queries[0], "general,it,q&a,news") {
+		t.Fatalf("searches = %v", queries)
 	}
 }
 

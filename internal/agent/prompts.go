@@ -71,7 +71,7 @@ func withReference(set *settings.Settings, task string) string {
 	if strings.TrimSpace(set.Context) == "" {
 		return task
 	}
-	return "Reference material provided with this task (your only source for its content):\n" +
+	return "Reference material provided with this task. Use it as your source for what it covers; for anything it does not cover, use your own knowledge and say so. Never claim it says something it does not:\n" +
 		"--- BEGIN REFERENCE ---\n" + set.Context + "\n--- END REFERENCE ---\n\n" + task
 }
 
