@@ -6,7 +6,9 @@ _Last updated: 2026-10-12_
 **Deployed and live** on the user's cluster: namespace `agent-spawner`, console at http://192.168.1.64:30880 (NodePort 30880 on any node). See deployment.md for every detail. Next steps depend on the user.
 
 ## Recent changes
-### 2026-10-17: email + password accounts (0.1.28, branch `feat/password-login`)
+### 2026-10-17: composer Run button layout (0.1.29, branch `fix/composer-actions-layout`)
+- The two composer checkboxes pushed Run 29 px outside the 360 px sidebar. Now: checkboxes on one line, full-width Run below, "Overrides apply to this run only" under it. Verified with Playwright at 1400 px and 390 px: no overflow.
+### 2026-10-17: email + password accounts (0.1.28, merged via PR #11; the user signed in successfully)
 - Migration 007: `app_user` (email unique lowercase, argon2id `password_hash`, `session_epoch`, `disabled`) and `auth_secret` (session-signing key generated once, shared by API replicas).
 - `internal/auth`: argon2id (m=19456 KiB, t=2, p=1, 16-byte salt, PHC string); v2 account sessions `v2.<exp>.<uid>.<epoch>.<mac>` checked against the account (15 s cache per replica); password change / reset / disable bumps the epoch → other sessions revoked. Lockout: 5 failures per email in 15 min → 429 for 15 min; 0.5 s fail delay; dummy hash for unknown emails (equal timing). Token login (v1) unchanged; accounts alone also enable auth.
 - `spawner user set|disable|enable <email>` (password on stdin) and `list`, run via `kubectl exec -i deploy/spawner-api -c api -- /spawner user ...`.

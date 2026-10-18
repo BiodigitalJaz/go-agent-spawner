@@ -29,7 +29,7 @@ configMapGenerator:
 images:
   - name: agent-spawner
     newName: ghcr.io/biodigitaljaz/agent-spawner
-    newTag: 0.1.28
+    newTag: 0.1.29
 # Access tokens for the API and console (comma-separated; optional but
 # strongly recommended):
 #   kubectl -n agents create secret generic spawner-auth \
