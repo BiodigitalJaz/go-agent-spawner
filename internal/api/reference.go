@@ -144,6 +144,15 @@ func fitToModel(req *createRequest, contextTokens, reserveOutput int, reference 
 			return fmt.Sprintf("parts larger than %d tokens are split so each agent fits the model's context alongside the reference", budget), nil
 		}
 	case req.Document != "":
+		var note string
+		if req.Chunks == 0 {
+			req.Chunks = agent.AutoChunks(req.Document)
+			if req.Chunks == 1 {
+				note = fmt.Sprintf("document read whole by one agent (about %d tokens; splitting only pays above about 6k)", len(req.Document)/4)
+			} else {
+				note = fmt.Sprintf("document split into %d chunks automatically (about %d tokens)", req.Chunks, len(req.Document)/4)
+			}
+		}
 		need := (len(req.Document)/3 + budget - 1) / budget
 		if need > 64 {
 			return "", fmt.Errorf("the document needs %d chunks to fit the model's context alongside the reference; the limit is 64", need)
@@ -152,6 +161,7 @@ func fitToModel(req *createRequest, contextTokens, reserveOutput int, reference 
 			req.Chunks = need
 			return fmt.Sprintf("document split into %d chunks so each agent fits the model's context alongside the reference", need), nil
 		}
+		return note, nil
 	}
 	return "", nil
 }

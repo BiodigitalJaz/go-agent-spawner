@@ -36,3 +36,20 @@ func PartBudget(contextTokens, reserveOutput, referenceChars, instructionChars i
 
 // MinPartBudget is exported for callers that reject requests that cannot fit.
 const MinPartBudget = minPartBudget
+
+// AutoChunks is the measured rule of thumb for splitting a document: one
+// context is as accurate and faster up to about 6k tokens (a split adds a
+// merge that rewrites the answer, roughly doubling the text generated);
+// above that 4 chunks were fastest and fully accurate up to 65k tokens on
+// an 8-slot server, and larger documents get one chunk per ~7.5k tokens.
+func AutoChunks(doc string) int {
+	t := len(doc) / 4
+	switch {
+	case t <= 6000:
+		return 1
+	case t <= 30000:
+		return 4
+	default:
+		return min(16, (t+7499)/7500)
+	}
+}

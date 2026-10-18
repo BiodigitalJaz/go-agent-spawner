@@ -307,7 +307,9 @@ function buildComposer() {
     h("option", { value: "list" }, "Merge: list (code, dedupe lines)"),
     h("option", { value: "concat" }, "Merge: concat (code, verbatim)"));
   const doc = h("textarea", { class: "mono doc", placeholder: "Paste a long document. The prompt above becomes the instruction applied to it.", "aria-label": "Document" });
-  const chunks = h("input", { type: "number", min: 1, max: 64, value: 4, "aria-label": "Chunks", title: "1 = whole document in one agent's context; more = split in code across parallel agents" });
+  // Empty = auto: the server reads documents up to ~6k tokens with one agent
+  // (splitting a small document adds a merge that doubles the writing).
+  const chunks = h("input", { type: "number", min: 1, max: 64, placeholder: "auto", "aria-label": "Chunks", title: "Leave empty for auto (one agent up to about 6k tokens, more chunks above). 1 = whole document in one agent; more = split across parallel agents" });
   const docInfo = h("span", { class: "faint" });
   doc.addEventListener("input", () => setText(docInfo, doc.value ? `≈${Math.round(doc.value.length / 4).toLocaleString()} tokens` : ""));
   const reference = h("textarea", { class: "mono doc", placeholder: "Reference material every agent sees: a page's text, rules the answer must respect (e.g. a brand guide's don'ts).", "aria-label": "Reference" });
@@ -355,7 +357,7 @@ function buildComposer() {
     if (model.value) body.model = model.value;
     if (depth.value !== "") body.max_depth = Number(depth.value);
     if (children.value !== "") body.max_children = Number(children.value);
-    if (doc.value.trim()) { body.document = doc.value; body.chunks = Number(chunks.value) || 1; }
+    if (doc.value.trim()) { body.document = doc.value; if (chunks.value !== "") body.chunks = Number(chunks.value); }
     if (merge.value) body.merge = merge.value;
     if (reference.value.trim()) body.context = reference.value;
     body.fetch_urls = fetchUrls.checked;

@@ -6,7 +6,11 @@ _Last updated: 2026-10-12_
 **Deployed and live** on the user's cluster: namespace `agent-spawner`, console at http://192.168.1.64:30880 (NodePort 30880 on any node). See deployment.md for every detail. Next steps depend on the user.
 
 ## Recent changes
-### 2026-10-18: linked pages vs web search (0.1.37, branch `fix/linked-pages-vs-search`)
+### 2026-10-18: auto document chunks (0.1.38, branch `feat/auto-chunks`)
+- Analysis of run 1c053de1 (explain systemPatterns.md, 9.6k chars ≈ 2.4k tokens): the console's Chunks default (4) split it into 3 parts + llm merge: 104 s, 65% in the merge (one stream rewrote 3,504 tokens at 53 tok/s), 7,040 tokens generated in total. Infra fine (0.5 s queue, ~1 s TTFT, no overflows).
+- Fix: `agent.AutoChunks` (moved from mcpserver; ≤6k tokens → 1, ≤30k → 4, else ceil(t/7500) ≤ 16) applied by the API when chunks is 0/omitted (`fitToModel`, with a `sizing` note); console Chunks box empty = auto; explicit numbers kept.
+- Rerun of the same task on auto: 1 agent, 26.5 s (4× faster), 1,304 tokens; the answer is shorter (5.8k vs 15k chars) since there is no merge expanding it.
+### 2026-10-18: linked pages vs web search (0.1.37, merged via PR #17)
 - Run 3128b439 ("summarize https://antrado.com/terms.html", search on): the page was fetched (9,034 chars, first in the reference) but search added 4 look-alike pages (antrados.cz translation agency, antrado.de shop); unlabelled, the 9B model said the terms weren't included.
 - Fix: linked pages always under "=== PAGES LINKED IN THE TASK (… the task is about these) ===" (`agent.LinkedPagesMarker`); search section labelled background; the query writer sees the linked page addresses and may return no queries (schema minItems 0) → "Search skipped: the pages linked in the task cover it"; with linked pages, a query-writer error also skips. Without linked pages, behaviour unchanged (falls back to the prompt as the query).
 - Verified: terms summary 12 s, search skipped, accurate (Oklahoma law, Stripe, Robinhood, 12-month liability cap); comparison prompt with a link still searches (stockbrokers.com, IBKR, …) and names real competitors.

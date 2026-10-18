@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/BiodigitalJaz/go-agent-spawner/internal/agent"
 	"os"
 	"strings"
 	"time"
@@ -158,20 +159,8 @@ type RunOutput struct {
 	ConsoleURL  string       `json:"console_url,omitempty"`
 }
 
-// AutoChunks applies the measured rule of thumb: one context is as accurate
-// and faster up to about 6k tokens; above that 4 chunks were fastest and
-// fully accurate up to 65k tokens on an 8-slot server.
-func AutoChunks(doc string) int {
-	t := len(doc) / 4
-	switch {
-	case t <= 6000:
-		return 1
-	case t <= 30000:
-		return 4
-	default:
-		return min(16, (t+7499)/7500)
-	}
-}
+// AutoChunks is the server's rule for document chunks (agent.AutoChunks).
+func AutoChunks(doc string) int { return agent.AutoChunks(doc) }
 
 func (s *server) runTask(ctx context.Context, req *mcp.CallToolRequest, in RunInput) (*mcp.CallToolResult, RunOutput, error) {
 	if strings.TrimSpace(in.Prompt) == "" {
