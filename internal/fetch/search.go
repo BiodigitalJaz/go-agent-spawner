@@ -16,7 +16,20 @@ type SearchResult struct {
 	Title   string
 	Snippet string
 	Engines []string
+	// Text is the page's text when the provider returns it (Exa), so the
+	// page needs no separate fetch.
+	Text string
+	// CostUSD is the provider's cost estimate attributed to this result.
+	CostUSD float64
 }
+
+// Backend is a search provider.
+type Backend interface {
+	Name() string
+	Search(ctx context.Context, query string) ([]SearchResult, error)
+}
+
+func (s *Searcher) Name() string { return "searxng" }
 
 // Searcher queries a SearXNG instance's JSON API. Its address is admin
 // configuration (SEARCH_URL), typically an in-cluster service, so it is not

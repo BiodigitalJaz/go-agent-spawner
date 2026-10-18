@@ -59,6 +59,9 @@ type Config struct {
 	// SearchCategories overrides the categories queried.
 	SearchURL        string
 	SearchCategories string
+	// ExaAPIKey enables Exa web search (official API, its own index).
+	ExaAPIKey string
+	ExaType   string
 }
 
 var modelName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,55}$`)
@@ -89,6 +92,8 @@ func Load() (*Config, error) {
 		AuthSessionTTL:    envDur("AUTH_SESSION_TTL", 7*24*time.Hour),
 		SearchURL:         env("SEARCH_URL", ""),
 		SearchCategories:  env("SEARCH_CATEGORIES", ""),
+		ExaAPIKey:         env("EXA_API_KEY", ""),
+		ExaType:           env("EXA_SEARCH_TYPE", "instant"),
 	}
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")

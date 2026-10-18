@@ -135,9 +135,18 @@ func run(mode string) error {
 		DeltaInterval: cfg.DeltaInterval,
 		JobTimeout:    cfg.JobTimeout,
 	}
+	var backends []fetch.Backend
 	if cfg.SearchURL != "" {
-		agentCfg.Searcher = fetch.NewSearcher(cfg.SearchURL, cfg.SearchCategories)
-		log.Info("web search enabled", "url", cfg.SearchURL)
+		backends = append(backends, fetch.NewSearcher(cfg.SearchURL, cfg.SearchCategories))
+	}
+	if cfg.ExaAPIKey != "" {
+		exa := fetch.NewExa(log, cfg.ExaAPIKey)
+		exa.Type = cfg.ExaType
+		backends = append(backends, exa)
+	}
+	if len(backends) > 0 {
+		agentCfg.Searcher = fetch.NewMulti(log, backends...)
+		log.Info("web search enabled", "backends", agentCfg.Searcher.Names())
 	}
 
 	riverCfg := &river.Config{
@@ -227,7 +236,7 @@ func run(mode string) error {
 	if runAPI {
 		defaults := settings.Defaults(cfg.Backends.Planner, cfg.Backends.Default, cfg.MaxDepth, cfg.MaxChildren)
 		apiSrv := api.New(log, db, client, bus, registry, defaults)
-		apiSrv.SearchEnabled = cfg.SearchURL != ""
+		apiSrv.SearchEnabled = cfg.SearchURL != "" || cfg.ExaAPIKey != ""
 		if err := apiSrv.Start(gctx); err != nil {
 			return err
 		}
