@@ -455,7 +455,15 @@ function treeView(root, id) {
   function apply(type, e) {
     const at = ms(e.time) || Date.now();
     if (type.startsWith("tree.")) {
-      if (type === "tree.done") { t.status = "done"; t.final = e.text; }
+      if (type === "tree.done") {
+        t.status = "done";
+        t.final = e.text;
+        // Large results arrive cut in the event; the full text is in the API.
+        if (e.text_truncated) api("GET", `/v1/trees/${id}`).then((d) => {
+          const r = d.nodes.find((n) => n.id === id);
+          if (r?.output) { t.final = r.output; dirty = true; }
+        }).catch(() => {});
+      }
       if (type === "tree.failed") { t.status = "failed"; t.finalError = e.text; }
       if (type === "tree.cancelled") {
         t.status = "cancelled";

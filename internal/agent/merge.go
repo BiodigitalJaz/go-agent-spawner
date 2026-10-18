@@ -190,6 +190,22 @@ func estimateRequest(msgs []llm.Message, maxTokens int) int {
 	return prompt + output
 }
 
+// wordsReserve is the output to reserve for an answer asked to stay under
+// words words: about 1.3 tokens per word, plus room for formatting and an
+// overshoot. The model is asked, not forced, so the overflow retry covers
+// the rare answer that runs long.
+func wordsReserve(words int) int { return words*3/2 + 128 }
+
+// partOutput returns the output to reserve for a node's answer: a part of a
+// run with part_max_words gets room for that many words, never more than
+// the role's own reserve.
+func partOutput(set *settings.Settings, node *store.Node, output int) int {
+	if set.PartMaxWords > 0 && node.ParentID != nil {
+		return min(output, wordsReserve(set.PartMaxWords))
+	}
+	return output
+}
+
 // estimateParts is estimateRequest split into prompt and reserved output, so
 // the pool can calibrate the prompt part against real token counts.
 func estimateParts(msgs []llm.Message, maxTokens int) (prompt, output int) {

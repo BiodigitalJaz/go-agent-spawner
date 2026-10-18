@@ -48,6 +48,10 @@ type Settings struct {
 	// Search runs a web search before planning (per run; set from the
 	// request, never saved globally).
 	Search bool `json:"search,omitempty"`
+	// PartMaxWords is the per-part answer cap asked of each part's agent
+	// (per run). Admission reserves room for about that many words instead
+	// of a full max_tokens, so more parts fit a shared context at once.
+	PartMaxWords int `json:"part_max_words,omitempty"`
 
 	// Context is a tree's reference material, sent to every agent. It is
 	// stored with the tree (agent_tree.context), not in the settings JSON.

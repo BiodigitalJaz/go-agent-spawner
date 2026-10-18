@@ -136,3 +136,20 @@ func (p PGUsers) List(ctx context.Context) ([]UserSummary, error) {
 	}
 	return out, rows.Err()
 }
+
+// Delete removes an account. Its sessions stop working once each API
+// replica's account cache expires (within 15 s).
+func (p PGUsers) Delete(ctx context.Context, email string) error {
+	tag, err := p.DB.Exec(ctx, `DELETE FROM app_user WHERE email = $1`, NormalizeEmail(email))
+	if err == nil && tag.RowsAffected() == 0 {
+		return ErrNoUser
+	}
+	return err
+}
+
+// ActiveCountExcept returns how many enabled accounts exist besides email.
+func (p PGUsers) ActiveCountExcept(ctx context.Context, email string) (int, error) {
+	var n int
+	err := p.DB.QueryRow(ctx, `SELECT count(*) FROM app_user WHERE NOT disabled AND email <> $1`, NormalizeEmail(email)).Scan(&n)
+	return n, err
+}

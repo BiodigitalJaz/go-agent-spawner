@@ -105,6 +105,7 @@ func partPrompt(instruction string, p Part, i, n int) string {
 func startChunked(ctx context.Context, db *pgxpool.Pool, client *river.Client[pgx.Tx], req TreeRequest) (*StartedTree, error) {
 	set := req.Settings
 	set.Context = req.Context
+	set.PartMaxWords = req.PartMaxWords
 	id := uuid.New()
 	parts := req.Parts
 	root := &store.Node{ID: id, TreeID: id, Prompt: req.Prompt, Model: set.Worker.Model, Role: string(RolePlan), Status: store.StatusQueued}
@@ -158,6 +159,7 @@ func startChunked(ctx context.Context, db *pgxpool.Pool, client *river.Client[pg
 func startPlanned(ctx context.Context, db *pgxpool.Pool, client *river.Client[pgx.Tx], req TreeRequest) (*store.Node, error) {
 	set := req.Settings
 	set.Context = req.Context
+	set.PartMaxWords = req.PartMaxWords
 	id := uuid.New()
 	args := TaskArgs{TreeID: id, NodeID: id, Role: RolePlan, Model: set.Planner.Model, Priority: req.Priority}
 	if set.MaxDepth == 0 {

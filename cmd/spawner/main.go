@@ -457,6 +457,7 @@ func runMCP() error {
 //	spawner user set <email>      create or reset (password on stdin; ends its sessions)
 //	spawner user disable <email>  block sign-in and end its sessions
 //	spawner user enable <email>
+//	spawner user delete <email>   remove the account (refused if it would leave the API without authentication)
 //	spawner user list
 func runUser(args []string) error {
 	dsn := os.Getenv("DATABASE_URL")
@@ -471,7 +472,7 @@ func runUser(args []string) error {
 	}
 	defer db.Close()
 	users := auth.PGUsers{DB: db}
-	usage := errors.New("usage: spawner user set|disable|enable <email> | spawner user list")
+	usage := errors.New("usage: spawner user set|disable|enable|delete <email> | spawner user list")
 	if len(args) == 0 {
 		return usage
 	}
@@ -489,7 +490,7 @@ func runUser(args []string) error {
 			fmt.Printf("%s\t%s\tcreated %s\tupdated %s\n", u.Email, state, u.CreatedAt.Format(time.RFC3339), u.UpdatedAt.Format(time.RFC3339))
 		}
 		return nil
-	case "set", "disable", "enable":
+	case "set", "disable", "enable", "delete":
 		if len(args) != 2 || !strings.Contains(args[1], "@") {
 			return usage
 		}
@@ -498,6 +499,21 @@ func runUser(args []string) error {
 	}
 	email := auth.NormalizeEmail(args[1])
 	switch args[0] {
+	case "delete":
+		// Deleting the last active account with no tokens configured would
+		// switch authentication off and leave the API open.
+		others, err := users.ActiveCountExcept(ctx, email)
+		if err != nil {
+			return err
+		}
+		if others == 0 && strings.TrimSpace(os.Getenv("AUTH_TOKENS")) == "" {
+			return fmt.Errorf("refusing to delete %s: it is the last active account and no AUTH_TOKENS are set, so the API would be left without authentication. Create another account first", email)
+		}
+		if err := users.Delete(ctx, email); err != nil {
+			return err
+		}
+		fmt.Printf("deleted %s (its sessions stop working within 15 seconds)\n", email)
+		return nil
 	case "disable", "enable":
 		if err := users.SetDisabled(ctx, email, args[0] == "disable"); err != nil {
 			return err

@@ -228,7 +228,7 @@ func (w *Worker) estimate(ctx context.Context, t *task) (prompt, output int, err
 		return prompt, output, nil
 	default:
 		prompt, output = estimateParts(execMessages(set, node), set.Worker.MaxTokens)
-		return prompt, output, nil
+		return prompt, partOutput(set, node, output), nil
 	}
 }
 
@@ -392,6 +392,9 @@ func (w *Worker) generateRetrying(ctx context.Context, t *task, role Role, model
 			return "", llm.Stats{}, lease, ctx.Err()
 		}
 		prompt, output := estimateParts(msgs, r.MaxTokens)
+		if role == RoleExec {
+			output = partOutput(t.set, t.node, output)
+		}
 		if lease, err = w.acquireRequest(ctx, model, prompt, output); err != nil {
 			return "", llm.Stats{}, lease, err
 		}

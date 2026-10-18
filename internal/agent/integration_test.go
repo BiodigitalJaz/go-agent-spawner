@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/BiodigitalJaz/go-agent-spawner/internal/auth"
 	"io"
 	"log/slog"
 	"net/http"
@@ -830,6 +831,68 @@ func TestSearchBudgetIsSharedAndMonthly(t *testing.T) {
 	}
 	if spent, _ := (&fetch.PGBudget{DB: h.db, Provider: "exa", LimitUSD: 9.5, Now: nov}).Spent(ctx); spent != 0 {
 		t.Fatalf("a new month starts at zero, got %v", spent)
+	}
+}
+
+// A result far over NATS's 1 MB message limit still finishes: the final
+// event carries a capped preview and the full result stays in Postgres.
+func TestHugeResultOverNATSLimit(t *testing.T) {
+	h := setup(t, &fakeLLM{})
+	set := h.set
+	set.Merge = settings.MergeConcat
+	big := strings.Repeat("x", 450_000) // one "word": streamed as one burst
+	parts := []agent.Part{{Title: "a", Text: big}, {Title: "b", Text: big}, {Title: "c", Text: big}}
+	started, err := agent.StartTree(context.Background(), h.db, h.client, agent.TreeRequest{
+		Prompt: "Echo.", Priority: 1, Settings: set, Parts: parts, MaxPartTokens: -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evs := h.collect(t, started.Root.TreeID)
+	last := evs[len(evs)-1]
+	if last.Type != events.TreeDone || !last.TextTruncated || len(last.Text) > events.MaxEventText {
+		t.Fatalf("final event: type %s truncated %v len %d", last.Type, last.TextTruncated, len(last.Text))
+	}
+	for _, e := range evs {
+		if len(e.Text) > events.MaxEventText {
+			t.Fatalf("%s event carried %d bytes", e.Type, len(e.Text))
+		}
+	}
+	nodes, _ := store.TreeNodes(context.Background(), h.db, started.Root.TreeID)
+	for _, n := range nodes {
+		if n.ParentID == nil && (n.Output == nil || len(*n.Output) < 3*450_000) {
+			t.Fatalf("the full result must be stored, got %d bytes", len(*n.Output))
+		}
+	}
+}
+
+func TestDeleteAccount(t *testing.T) {
+	h := setup(t, &fakeLLM{})
+	ctx := context.Background()
+	users := auth.PGUsers{DB: h.db}
+	hash, _ := auth.HashPassword("a long enough password")
+	for _, e := range []string{"one@example.com", "two@example.com"} {
+		if _, err := users.UpsertUser(ctx, e, hash); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, _ := users.ActiveCountExcept(ctx, "one@example.com"); n != 1 {
+		t.Fatalf("others besides one = %d", n)
+	}
+	if err := users.SetDisabled(ctx, "two@example.com", true); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := users.ActiveCountExcept(ctx, "one@example.com"); n != 0 {
+		t.Fatalf("a disabled account must not count as active, got %d", n)
+	}
+	if err := users.Delete(ctx, "ONE@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := users.ByEmail(ctx, "one@example.com"); !errors.Is(err, auth.ErrNoUser) {
+		t.Fatalf("deleted account still found: %v", err)
+	}
+	if err := users.Delete(ctx, "one@example.com"); !errors.Is(err, auth.ErrNoUser) {
+		t.Fatalf("deleting twice: %v", err)
 	}
 }
 
