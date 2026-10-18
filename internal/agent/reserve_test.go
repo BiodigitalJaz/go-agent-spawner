@@ -26,3 +26,14 @@ func TestPartOutputFollowsPartMaxWords(t *testing.T) {
 		t.Fatalf("never more than the role's reserve, got %d", got)
 	}
 }
+
+func TestLinkedPages(t *testing.T) {
+	ref := LinkedPagesMarker + " (fetched…) ===\n\n## Page fetched from https://antrado.com/terms.html\nTitle: Terms\n\ntext\n\n## Page fetched from https://antrado.com/\n\n=== GUIDELINES AND FACTS TO RESPECT ===\n## Page fetched from https://not-linked.example\n"
+	got := linkedPages(ref)
+	if len(got) != 2 || got[0] != "https://antrado.com/terms.html" || got[1] != "https://antrado.com/" {
+		t.Fatalf("linked = %v", got)
+	}
+	if linkedPages("no linked pages here") != nil {
+		t.Fatal("expected none")
+	}
+}

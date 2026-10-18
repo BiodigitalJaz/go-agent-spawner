@@ -14,6 +14,10 @@ import (
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/store"
 )
 
+// LinkedPagesMarker heads the reference section holding the pages fetched
+// from the task's own links.
+const LinkedPagesMarker = "=== PAGES LINKED IN THE TASK"
+
 const (
 	maxSearchQueries = 3
 	maxSearchResults = 8 // listed in the reference
@@ -24,13 +28,15 @@ const (
 func searchSchema() *llm.Schema {
 	return &llm.Schema{Name: "search_queries", Schema: json.RawMessage(fmt.Sprintf(`{
   "type": "object",
-  "properties": {"queries": {"type": "array", "minItems": 1, "maxItems": %d, "items": {"type": "string"}}},
+  "properties": {"queries": {"type": "array", "minItems": 0, "maxItems": %d, "items": {"type": "string"}}},
   "required": ["queries"],
   "additionalProperties": false
 }`, maxSearchQueries))}
 }
 
-const searchQueryDirective = `You write web search queries. Given a task, return up to 3 short keyword queries (3 to 8 words each) that would find pages with the information the task needs. Use the words such pages would contain, not the task's instructions. Do not answer the task.`
+const searchQueryDirective = `You write web search queries. Given a task, return up to 3 short keyword queries (3 to 8 words each) that would find pages with the information the task needs. Use the words such pages would contain, not the task's instructions. Do not answer the task.
+
+If the task is about specific pages that were already fetched (listed below the task) and they are enough on their own (for example, summarizing or reviewing one page), return an empty list: searching would only add unrelated pages. Search only for information those pages do not contain.`
 
 // search runs the root's web search: the planner model writes queries,
 // SearXNG returns results, the top pages are fetched (through the
@@ -54,15 +60,25 @@ func (w *Worker) search(ctx context.Context, t *task, lease *backend.Lease) (*ba
 	var q struct {
 		Queries []string `json:"queries"`
 	}
+	linked := linkedPages(t.set.Context)
+	user := "Task:\n" + t.node.Prompt
+	if len(linked) > 0 {
+		user += "\n\nPages from the task's links, already fetched:\n- " + strings.Join(linked, "\n- ")
+	}
 	req := request(lease, t.set.Planner, []llm.Message{
 		{Role: "system", Content: searchQueryDirective},
-		{Role: "user", Content: "Task:\n" + t.node.Prompt},
+		{Role: "user", Content: user},
 	})
 	req.JSONSchema = searchSchema()
 	stats, err := lease.Endpoint.Client.JSON(ctx, req, &q, nil)
 	lease.Done(stats, err)
-	if err != nil || len(q.Queries) == 0 {
-		q.Queries = []string{t.node.Prompt} // fall back to the task itself
+	switch {
+	case len(linked) > 0 && (err != nil || len(q.Queries) == 0):
+		// The task's own pages are in hand: no search beats a noisy one.
+		note.Write("Search skipped: the pages linked in the task cover it.\n")
+		return w.reacquire(ctx, t)
+	case err != nil || len(q.Queries) == 0:
+		q.Queries = []string{t.node.Prompt} // the user asked to search: use the task itself
 	}
 	if len(q.Queries) > maxSearchQueries {
 		q.Queries = q.Queries[:maxSearchQueries]
@@ -169,7 +185,7 @@ func (w *Worker) reacquire(ctx context.Context, t *task) (*backend.Lease, error)
 // address and snippet, so agents can cite sources.
 func searchReference(queries []string, results []fetch.SearchResult, pages []*fetch.Page, room int) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s (searched for: %s) ===\n", searchMarker, strings.Join(queries, "; "))
+	fmt.Fprintf(&b, "%s (searched for: %s; background only, may be unrelated to any pages linked in the task) ===\n", searchMarker, strings.Join(queries, "; "))
 	if len(results) == 0 {
 		b.WriteString("\nThe web search found nothing. Answer from your own knowledge if you can, and say the search found nothing.\n")
 		return b.String()
@@ -199,4 +215,24 @@ func searchReference(queries []string, results []fetch.SearchResult, pages []*fe
 		fmt.Fprintf(&b, "\n## Page: %s\nTitle: %s\n\n%s\n", p.URL, p.Title, text)
 	}
 	return b.String()
+}
+
+// linkedPages lists the addresses of the pages fetched from the task's own
+// links, from the reference's linked-pages section.
+func linkedPages(reference string) []string {
+	i := strings.Index(reference, LinkedPagesMarker)
+	if i < 0 {
+		return nil
+	}
+	section := reference[i:]
+	if j := strings.Index(section[len(LinkedPagesMarker):], "\n=== "); j >= 0 {
+		section = section[:len(LinkedPagesMarker)+j]
+	}
+	var out []string
+	for _, line := range strings.Split(section, "\n") {
+		if u, ok := strings.CutPrefix(line, "## Page fetched from "); ok {
+			out = append(out, strings.TrimSpace(u))
+		}
+	}
+	return out
 }

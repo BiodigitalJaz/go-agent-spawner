@@ -63,7 +63,7 @@ func TestReference(t *testing.T) {
 	if len(fetched) != 1 || fetched[0].Title != "Antrado" || !fetched[0].Truncated {
 		t.Fatalf("fetched = %+v", fetched)
 	}
-	for _, want := range []string{"=== MATERIAL UNDER REVIEW", "=== GUIDELINES AND FACTS TO RESPECT", "## Page fetched from " + page.URL, "# We do not claim it makes money", "[page truncated", "BRAND RULES: no testimonials"} {
+	for _, want := range []string{"=== PAGES LINKED IN THE TASK", "=== GUIDELINES AND FACTS TO RESPECT", "## Page fetched from " + page.URL, "# We do not claim it makes money", "[page truncated", "BRAND RULES: no testimonials"} {
 		if !strings.Contains(ref, want) {
 			t.Fatalf("reference missing %q", want)
 		}
