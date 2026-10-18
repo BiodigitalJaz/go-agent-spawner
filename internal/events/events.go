@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
@@ -70,15 +71,48 @@ type Event struct {
 	Role     string     `json:"role,omitempty"`
 	Title    string     `json:"title,omitempty"`
 	Text     string     `json:"text,omitempty"`
-	Children []Child    `json:"children,omitempty"`
-	Stats    *Stats     `json:"stats,omitempty"`
-	Time     time.Time  `json:"time"`
+	// TextTruncated: Text was cut to MaxEventText; the full text is in
+	// Postgres (GET /v1/trees/{id}).
+	TextTruncated bool      `json:"text_truncated,omitempty"`
+	Children      []Child   `json:"children,omitempty"`
+	Stats         *Stats    `json:"stats,omitempty"`
+	Time          time.Time `json:"time"`
 }
 
 const (
 	streamName    = "AGENT_EVENTS"
 	subjectPrefix = "agents.tree."
+
+	// MaxEventText caps the text one event carries. NATS refuses messages
+	// over 1 MB by default; results of any size live in Postgres, so events
+	// only need enough for live display.
+	MaxEventText = 64 << 10
 )
+
+// capText cuts an event's text to MaxEventText on a rune boundary.
+func capText(e *Event) {
+	if len(e.Text) <= MaxEventText {
+		return
+	}
+	e.Text = strings.ToValidUTF8(e.Text[:MaxEventText], "")
+	e.TextTruncated = true
+}
+
+// chunks splits streamed text into pieces of at most MaxEventText bytes,
+// on rune boundaries, so a large burst (a code merge's whole result) is
+// sent as several deltas instead of one oversized message.
+func chunks(s string) []string {
+	var out []string
+	for len(s) > MaxEventText {
+		cut := MaxEventText
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		out = append(out, s[:cut])
+		s = s[cut:]
+	}
+	return append(out, s)
+}
 
 func subject(e Event) string {
 	return fmt.Sprintf("%s%s.%s.%s", subjectPrefix, e.TreeID, e.NodeID, e.Type)
@@ -157,6 +191,7 @@ func (b *Bus) Publish(ctx context.Context, e Event) error {
 	if e.Time.IsZero() {
 		e.Time = time.Now()
 	}
+	capText(&e)
 	data, err := json.Marshal(e)
 	if err != nil {
 		return err
@@ -217,7 +252,9 @@ func (w *DeltaWriter) flush() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.buf.Len() > 0 {
-		w.emit(w.buf.String())
+		for _, c := range chunks(w.buf.String()) {
+			w.emit(c)
+		}
 		w.buf.Reset()
 	}
 }
