@@ -6,6 +6,10 @@ _Last updated: 2026-10-18_
 **Deployed and live** on the user's cluster: namespace `agent-spawner`, console at http://192.168.1.64:30880 (NodePort 30880 on any node). See deployment.md for every detail. Next steps depend on the user.
 
 ## Recent changes
+### 2026-10-18: quiet source check (0.1.52, branch `feat/quiet-source-check`)
+- User feedback: the streamed source-check rewrite meant reading the answer twice. Now `task.quiet` suppresses its deltas and the repeated node.started; the status line says "Checking the answer against its sources…" and the final text replaces the answer once (verified on the SSE stream). The rules check still streams.
+- Live settings v11 directives equal the git defaults (`settings.Defaults`); role models/temps, depth and the `qwen9b-fast` model entry live only in Postgres (`agent_settings`, `agent_model`); `qwen27b` comes from `overlays/andor/backends.json`.
+
 ### 2026-10-18: grounded chat answers (0.1.51, branch `feat/chat-grounding`)
 - Trigger: crossbow/turkey chats after 0.1.49. The pool run refused ("crossbows are not listed"): ODWC's fall-turkey page says "Archery: equipment legal for big game. See Big Game Regulations" and the Big Game page (crossbow rules) was not fetched. The single run invented a "$20 Crossbow Permit". The pool itself did nothing there: the planner chose "direct".
 - Directive (live settings v11): "not mentioned is not banned"; follow "see X"; place/time facts (fees, dates, limits, legal requirements) only from sources. **General know-how needs no source**: the first wording ("every number must come from the sources") made the model refuse recipes and smoking temps, so it was narrowed in 0.1.51. `withReference` preamble also says absence is not prohibition.
