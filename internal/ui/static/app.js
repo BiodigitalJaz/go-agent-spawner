@@ -1875,70 +1875,168 @@ function benchSection(getDisc) {
   }
   const ms = (v) => (v ? fmtDur(v) : "–");
   const num = (v, d = 1) => (v ? v.toFixed(d) : "–");
+  const pctOf = (a, b) => (b ? Math.round((100 * a) / b) : null);
+  const ZERO_ID = "00000000-0000-0000-0000-000000000000";
   function renderDetail() {
     const b = detail;
     if (!b) { detailEl.replaceChildren(); return; }
     const r = b.results || {};
     const active = ACTIVE.has(b.status);
+    const models = r.models || [];
+    const cases = r.cases || [];
     const head = h("div", { class: "bench-head" },
       h("span", { class: `pill ${pillClass[b.status] || ""}${active ? " live" : ""}` }, b.status),
       h("span", {}, active ? r.phase || "" : `judged by ${r.judge}`),
       r.chat_id && h("a", { href: `#/chat/${r.chat_id}` }, "Open the chat"),
       h("span", { class: "grow" }),
+      !active && h("button", { class: "btn small", onclick: () => downloadReport(b) }, "Download report"),
       h("button", { class: "btn small danger", onclick: () => removeBench(b, active) }, active ? "Cancel" : "Delete"));
-    const models = r.models || [];
+
+    // ---- summary table ----
     const sumHead = h("tr", {}, h("th", {}, "Model"), h("th", {}, "Status"),
       h("th", { class: "num", title: "Answers that finished with text" }, "Answered"),
-      h("th", { class: "num", title: "Answers that declined or withheld the help asked for" }, "Refusals"),
-      h("th", { class: "num", title: "Fees, dates, limits or legal claims not in the sources (or stated as certain without sources)" }, "Invented specifics"),
-      h("th", { class: "num", title: "Clearly wrong general knowledge" }, "Knowledge slips"),
-      h("th", { class: "num", title: "Median tokens per second of one answer" }, "tok/s"),
+      h("th", { class: "num", title: "Answers the judge found declined or withheld the help asked for" }, "Refusals"),
+      h("th", { class: "num", title: "Judge: specific claims about what the sources cover that the sources don't contain" }, "Invented"),
+      h("th", { class: "num", title: "Judge: clearly wrong general knowledge" }, "Slips"),
+      h("th", { class: "num", title: "Numbers in answers to messages with sources (prices, specs, dates…) that appear in those sources. Checked in code, no judge." }, "Sourced figures"),
+      h("th", { class: "num", title: "Median tokens per second of one answer (range: slowest–fastest)" }, "tok/s"),
       h("th", { class: "num", title: "All tokens of the concurrent batch divided by its wall time" }, "Total tok/s"),
-      h("th", { class: "num", title: "Median time to first token" }, "TTFT"),
+      h("th", { class: "num", title: "Time to first token: median / slowest 10%" }, "TTFT"),
+      h("th", { class: "num", title: "Average answer length in tokens" }, "Avg length"),
       h("th", { class: "num", title: "Wall time of the concurrent batch" }, "Batch time"));
     const lowest = (key) => { const v = models.filter((m) => m.judged).map((m) => m[key]); return v.length > 1 ? Math.min(...v) : null; };
     const best = { refusals: lowest("refusals"), unsupported: lowest("unsupported"), slips: lowest("slips") };
+    const figPct = (m) => pctOf(m.figures_sourced || 0, m.figures || 0);
+    const figs = models.map(figPct).filter((v) => v != null);
+    const bestFig = figs.length > 1 ? Math.max(...figs) : null;
+    const tpsVals = models.map((m) => m.median_tps || 0).filter(Boolean);
+    const bestTPS = tpsVals.length > 1 ? Math.max(...tpsVals) : null;
     const cell = (m, key) => h("td", { class: `num${best[key] != null && m[key] === best[key] ? " best" : ""}` }, m.judged ? String(m[key]) : "–");
+    const short = (m) => m.ran_at_once && m.ran_at_once * 2 <= m.parallel;
     const sumRows = models.map((m) => h("tr", {},
       h("td", {}, h("b", {}, m.name), h("div", { class: "faint mono" }, m.model)),
       h("td", {}, m.status, m.error && h("div", { class: "faint" }, m.error)),
-      h("td", { class: "num" }, `${m.answered || 0}/${(r.cases || []).length}`),
+      h("td", { class: "num" }, `${m.answered || 0}/${cases.length}`),
       cell(m, "refusals"), cell(m, "unsupported"), cell(m, "slips"),
-      h("td", { class: "num" }, num(m.median_tps)),
-      h("td", { class: `num${m.ran_at_once && m.ran_at_once < m.parallel ? " warn" : ""}`,
-        title: m.ran_at_once && m.ran_at_once < m.parallel ? `Only ${m.ran_at_once} answer(s) ran at a time: the backend has fewer parallel slots than ${m.parallel}. Compare tok/s per answer instead.` : "" },
-        m.aggregate_tps ? `${num(m.aggregate_tps)} @${m.parallel}` : "–",
-        m.ran_at_once && m.ran_at_once < m.parallel ? h("div", { class: "faint" }, `ran ${m.ran_at_once} at a time`) : null),
-      h("td", { class: "num" }, ms(m.median_ttft_ms)),
+      h("td", { class: `num${bestFig != null && figPct(m) === bestFig ? " best" : ""}` }, figPct(m) != null ? `${figPct(m)}%` : "–",
+        m.figures ? h("div", { class: "faint" }, `${m.figures_sourced || 0} of ${m.figures}`) : null),
+      h("td", { class: `num${bestTPS != null && m.median_tps === bestTPS ? " best" : ""}` }, num(m.median_tps),
+        m.min_tps ? h("div", { class: "faint" }, `${num(m.min_tps)}–${num(m.max_tps)}`) : null),
+      h("td", { class: `num${short(m) ? " warn" : ""}`,
+        title: short(m) ? `Only ${m.ran_at_once} answer(s) ran at a time: the backend has too few parallel slots. Compare tok/s per answer instead.` : "" },
+        m.aggregate_tps ? `${num(m.aggregate_tps, 0)} @${m.parallel}` : "–",
+        m.ran_at_once ? h("div", { class: "faint" }, `ran ${m.ran_at_once} at once`) : null),
+      h("td", { class: "num" }, ms(m.median_ttft_ms), m.p90_ttft_ms ? h("div", { class: "faint" }, `p90 ${ms(m.p90_ttft_ms)}`) : null),
+      h("td", { class: "num" }, m.avg_tokens ? `${m.avg_tokens}` : "–"),
       h("td", { class: "num" }, ms(m.wall_ms))));
-    const cases = (r.cases || []).map((c, ci) => h("section", { class: "panel bench-case" },
-      h("div", { class: "bench-q" }, h("span", { class: "faint" }, `Message ${ci + 1}${c.sources ? " · with sources" : " · no sources"}`), h("div", {}, c.prompt.length > 300 ? c.prompt.slice(0, 300) + "…" : c.prompt)),
-      ...models.map((m) => {
-        const a = (m.answers || []).find((x) => x.case === ci);
-        if (!a) return h("div", { class: "faint bench-a" }, `${m.name}: waiting…`);
-        const tags = [];
-        if (a.refused != null) tags.push(a.refused ? "refused" : "helped");
-        if (a.unsupported) tags.push(`${a.unsupported.length} invented`);
-        if (a.slips) tags.push(`${a.slips.length} slips`);
-        if (a.judge_error) tags.push(a.judge_error);
-        if (a.judge_dropped) tags.push(`${a.judge_dropped} judge finding(s) dropped: their figures are in the sources`);
-        if (a.tokens_per_second) tags.push(`${a.tokens_per_second.toFixed(1)} tok/s`);
-        return h("details", { class: "bench-a" },
-          h("summary", {}, h("b", {}, m.name), " ", h("span", { class: `faint${a.refused ? " bad" : ""}` }, a.status !== "done" ? `${a.status}${a.error ? ": " + a.error : ""}` : tags.join(" · "))),
-          a.refused && h("div", { class: "finding bad" }, "Judged a refusal"),
-          ...(a.unsupported || []).map((x) => h("div", { class: "finding" }, "Invented: ", x)),
-          ...(a.slips || []).map((x) => h("div", { class: "finding" }, "Slip: ", x)),
-          a.output && h("div", { class: "out md bench-out" }, renderMarkdown(a.output)),
-          h("div", { class: "bench-links" },
-            a.tree_id && h("a", { href: `#/runs/${a.tree_id}`, class: "faint" }, "View run"),
-            a.judge_tree && a.judge_tree !== "00000000-0000-0000-0000-000000000000" && h("a", { href: `#/runs/${a.judge_tree}`, class: "faint" }, "View judge run")));
-      })));
+
+    // ---- written analysis ----
+    const analysis = (r.analysis || []).length ? h("div", { class: "bench-analysis" },
+      h("h4", {}, "Analysis"), h("ul", {}, ...r.analysis.map((t) => h("li", {}, t)))) : null;
+
+    // ---- by message grid ----
+    const score = (a) => (a && a.refused != null ? (a.refused ? 5 : 0) + (a.unsupported || []).length + (a.slips || []).length : null);
+    const gridHead = h("tr", {}, h("th", {}, "Message"), ...models.map((m) => h("th", {}, m.name)));
+    const gridRows = cases.map((c, ci) => {
+      const scores = models.map((m) => score((m.answers || []).find((x) => x.case === ci)));
+      const known = scores.filter((v) => v != null);
+      const min = known.length === models.length && models.length > 1 ? Math.min(...known) : null;
+      const unique = min != null && known.filter((v) => v === min).length === 1;
+      return h("tr", {},
+        h("td", {}, h("a", { href: `#bench-case-${ci}`, onclick: (e) => { e.preventDefault(); document.getElementById(`bench-case-${ci}`)?.scrollIntoView({ behavior: "smooth" }); } }, `${ci + 1}. ${c.category || (c.prompt.length > 60 ? c.prompt.slice(0, 60) + "…" : c.prompt)}`),
+          h("div", { class: "faint" }, c.sources ? "with sources" : "no sources")),
+        ...models.map((m, mi) => {
+          const a = (m.answers || []).find((x) => x.case === ci);
+          if (!a) return h("td", { class: "faint" }, "–");
+          if (a.status !== "done") return h("td", { class: "bad" }, a.status);
+          const bits = [];
+          if (a.refused) bits.push("refused");
+          if (a.refused != null) bits.push(`${(a.unsupported || []).length} inv · ${(a.slips || []).length} slip`);
+          if (a.figures) bits.push(`figures ${a.figures_sourced}/${a.figures}`);
+          bits.push(`${a.tokens || 0} tok · ${num(a.tokens_per_second)} tok/s`);
+          return h("td", { class: `${unique && scores[mi] === min ? "best" : ""}${a.refused ? " bad" : ""}` }, ...bits.map((t) => h("div", {}, t)));
+        }));
+    });
+    const grid = cases.length && models.length ? h("div", {},
+      h("h4", {}, "By message", h("span", { class: "hint" }, " highlighted: fewest judge findings on that message")),
+      h("div", { class: "table-scroll" }, h("table", { class: "bench-table bench-grid-table" }, h("thead", {}, gridHead), h("tbody", {}, ...gridRows)))) : null;
+
+    // ---- per message: answers side by side ----
+    const casePanels = cases.map((c, ci) => h("section", { class: "panel bench-case", id: `bench-case-${ci}` },
+      h("div", { class: "bench-q" },
+        h("span", { class: "faint" }, `Message ${ci + 1}${c.category ? " · " + c.category : ""}${c.sources ? " · with sources" : " · no sources"}`),
+        h("div", {}, c.prompt.length > 400 ? c.prompt.slice(0, 400) + "…" : c.prompt),
+        c.sources && c.source_tree && c.source_tree !== ZERO_ID && h("a", { href: `#/runs/${c.source_tree}`, class: "faint", style: "font-size:12px" }, "View the sources (original run)")),
+      h("div", { class: "bench-side", style: `--cols:${Math.max(models.length, 1)}` }, ...models.map((m) => answerColumn(m, (m.answers || []).find((x) => x.case === ci))))));
+
     detailEl.replaceChildren(h("section", { class: "panel bench-summary" }, head,
       b.error && h("div", { class: "banner error" }, b.error),
       ...(r.notes || []).map((n) => h("div", { class: "banner warn" }, n)),
       h("div", { class: "table-scroll" }, h("table", { class: "bench-table" }, h("thead", {}, sumHead), h("tbody", {}, ...sumRows))),
-      h("p", { class: "note" }, `Scores come from the judge model (${r.judge || "?"}) and are only as good as it is: open an answer to check its findings. Speed is measured with ${models[0]?.parallel || "?"} answers at a time.`)),
-      ...cases);
+      analysis, grid),
+      ...casePanels);
+  }
+
+  function answerColumn(m, a) {
+    if (!a) return h("div", { class: "bench-col faint" }, h("b", {}, m.name), h("div", {}, "waiting…"));
+    const tags = [];
+    if (a.status !== "done") tags.push(`${a.status}${a.error ? ": " + a.error : ""}`);
+    else {
+      if (a.refused != null) tags.push(a.refused ? "refused" : "helped");
+      if (a.figures) tags.push(`figures ${a.figures_sourced}/${a.figures} in sources`);
+      tags.push(`${a.tokens || 0} tokens`, `${num(a.tokens_per_second)} tok/s`, `first token ${ms(a.ttft_ms)}`);
+      if (a.judge_error) tags.push(a.judge_error);
+    }
+    return h("div", { class: "bench-col" },
+      h("div", { class: "bench-col-head" }, h("b", {}, m.name), h("div", { class: `faint${a.refused ? " bad" : ""}` }, tags.join(" · "))),
+      a.refused && h("div", { class: "finding bad" }, "Judged a refusal"),
+      ...(a.unsupported || []).map((x) => h("div", { class: "finding" }, h("b", {}, "Invented: "), x)),
+      ...(a.slips || []).map((x) => h("div", { class: "finding" }, h("b", {}, "Slip: "), x)),
+      a.unsourced?.length ? h("div", { class: "finding faint", title: "Numbers in this answer that do not appear in the sources: not always wrong (general knowledge, conversions), but worth checking" }, h("b", {}, "Figures not in the sources: "), a.unsourced.join(", ")) : null,
+      a.judge_dropped ? h("div", { class: "finding faint" }, `${a.judge_dropped} judge finding(s) dropped as judge mistakes (no correction given, or the figures are in the sources)`) : null,
+      a.output && h("div", { class: "out md bench-out" }, renderMarkdown(a.output)),
+      h("div", { class: "bench-links" },
+        a.tree_id && a.tree_id !== ZERO_ID && h("a", { href: `#/runs/${a.tree_id}`, class: "faint" }, "View run"),
+        a.judge_tree && a.judge_tree !== ZERO_ID && h("a", { href: `#/runs/${a.judge_tree}`, class: "faint" }, "View judge run")));
+  }
+
+  // downloadReport saves the benchmark as Markdown, for sharing or keeping
+  // next to the config it tested.
+  function downloadReport(b) {
+    const r = b.results || {};
+    const models = r.models || [];
+    const cases = r.cases || [];
+    const L = [];
+    L.push(`# Benchmark ${new Date(b.created_at).toISOString().slice(0, 16).replace("T", " ")} UTC`, "");
+    L.push(`Models: ${models.map((m) => `${m.name} (${m.model})`).join(", ")}  `);
+    L.push(`Judge: ${r.judge} · ${models[0]?.parallel || "?"} answers at once · ${cases.length} message(s)`, "");
+    L.push("| Model | Answered | Refusals | Invented | Slips | Sourced figures | tok/s | Total tok/s | TTFT (p50/p90) | Avg length |", "|---|---|---|---|---|---|---|---|---|---|");
+    for (const m of models) {
+      const fp = pctOf(m.figures_sourced || 0, m.figures || 0);
+      L.push(`| ${m.name} | ${m.answered || 0}/${cases.length} | ${m.judged ? m.refusals : "–"} | ${m.judged ? m.unsupported : "–"} | ${m.judged ? m.slips : "–"} | ${fp != null ? `${fp}% (${m.figures_sourced}/${m.figures})` : "–"} | ${num(m.median_tps)} | ${num(m.aggregate_tps, 0)} (ran ${m.ran_at_once || "?"} at once) | ${ms(m.median_ttft_ms)} / ${ms(m.p90_ttft_ms)} | ${m.avg_tokens || "–"} |`);
+    }
+    if ((r.analysis || []).length) { L.push("", "## Analysis", ""); for (const t of r.analysis) L.push(`- ${t}`); }
+    if ((r.notes || []).length) { L.push("", "## Notes", ""); for (const t of r.notes) L.push(`- ${t}`); }
+    cases.forEach((c, ci) => {
+      L.push("", `## ${ci + 1}. ${c.category || "Message"}`, "", `> ${c.prompt.replace(/\n/g, "\n> ")}`, "");
+      for (const m of models) {
+        const a = (m.answers || []).find((x) => x.case === ci);
+        if (!a) continue;
+        L.push(`### ${m.name}`, "");
+        L.push(`${a.status}${a.refused ? " · **refused**" : ""} · ${a.tokens || 0} tokens · ${num(a.tokens_per_second)} tok/s${a.figures ? ` · figures in sources ${a.figures_sourced}/${a.figures}` : ""}`, "");
+        for (const x of a.unsupported || []) L.push(`- Invented: ${x}`);
+        for (const x of a.slips || []) L.push(`- Slip: ${x}`);
+        if (a.unsourced?.length) L.push(`- Figures not in the sources: ${a.unsourced.join(", ")}`);
+        L.push("", "<details><summary>Answer</summary>", "", a.output || "", "", "</details>", "");
+      }
+    });
+    const blob = new Blob([L.join("\n")], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const link = h("a", { href: url, download: `benchmark-${b.created_at.slice(0, 10)}-${models.map((m) => m.name).join("-vs-")}.md` });
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
   async function removeBench(b, active) {
     if (!active && !confirm("Delete this benchmark and the runs it made?")) return;

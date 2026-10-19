@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -65,5 +66,42 @@ func TestCleanSlips(t *testing.T) {
 	}, ref)
 	if dropped != 2 || len(kept) != 1 || kept[0][:9] != "new_stack" {
 		t.Fatalf("kept %v dropped %d", kept, dropped)
+	}
+}
+
+func TestFigures(t *testing.T) {
+	ref := "Price: $25. Batteries: 2600 mAh. Field of view 130 degrees. Operating -4°F to 122°F."
+	total, uns := figures("A license costs $25. It has 2,600 mAh batteries, a 130° view, 8x zoom and lasts 3 to 6 months; it ships with a $20 permit and 1/2.9 sensor.", ref)
+	// $25, 2,600, 130, 20, 1/2.9 (single digits are skipped)
+	if total != 5 || len(uns) != 2 || uns[0] != "20" || uns[1] != "1/2.9" {
+		t.Fatalf("total %d unsourced %v", total, uns)
+	}
+}
+
+func TestAnalyze(t *testing.T) {
+	no, yes := false, true
+	res := benchResults{
+		Judge: "a",
+		Cases: []benchCase{{Prompt: benchSuite[1]}, {Prompt: "other"}},
+		Models: []benchModel{
+			{Name: "a", Answered: 2, Judged: 2, Parallel: 4, MedianTPS: 30, AggregateTPS: 110, MedianTTFTMs: 2000, Answers: []benchAnswer{
+				{Case: 0, Status: "done", Tokens: 800, TPS: 30, Output: "costs $63.99 and has 2,600 mAh", Refused: &no, Slips: []string{"x -> y"}},
+				{Case: 1, Status: "done", Tokens: 700, TPS: 29, Output: "fine", Refused: &no},
+			}},
+			{Name: "b", Answered: 2, Judged: 2, Parallel: 4, MedianTPS: 22, AggregateTPS: 90, MedianTTFTMs: 5000, Answers: []benchAnswer{
+				{Case: 0, Status: "done", Tokens: 500, TPS: 22, Output: "costs $63.99 and has 5,200 mAh", Refused: &no},
+				{Case: 1, Status: "done", Tokens: 400, TPS: 21, Output: "no", Refused: &yes},
+			}},
+		},
+	}
+	analyze(&res, []string{"Price $63.99. Battery 2600 mAh.", ""})
+	if res.Cases[0].Category != "Product facts from sources" || res.Models[0].FiguresSourced != 2 || res.Models[1].FiguresSourced != 1 {
+		t.Fatalf("figures: %+v %+v", res.Models[0], res.Models[1])
+	}
+	text := strings.Join(res.Analysis, "\n")
+	for _, want := range []string{"a is fastest", "b's answers are", "a stays closer to its sources", "b refused or withheld help on: message 2", "also one of the compared models"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("analysis missing %q:\n%s", want, text)
+		}
 	}
 }

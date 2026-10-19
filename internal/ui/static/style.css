@@ -563,3 +563,16 @@ details.thinking.live summary .lbl::after { content: "…"; animation: pulse 1.2
 .bench-suite { font-size: 12.5px; }
 .bench-suite summary { cursor: pointer; color: var(--muted); }
 .bench-suite ol { margin: 6px 0 8px; padding-left: 22px; }
+.bench-analysis { margin-top: 14px; font-size: 13px; }
+.bench-analysis h4, .bench-summary h4 { margin: 16px 0 6px; font-size: 13px; }
+.bench-analysis ul { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; line-height: 1.45; }
+.bench-grid-table td { font-size: 12px; }
+.bench-grid-table td div + div { color: var(--muted); }
+.bench-table td.best { color: var(--c-done); }
+.bench-grid-table td.best { background: color-mix(in srgb, var(--c-done) 10%, transparent); }
+.bench-grid-table td.bad, .bench-col .bad { color: var(--c-failed); }
+.bench-side { display: grid; grid-template-columns: repeat(var(--cols), minmax(0, 1fr)); gap: 12px; }
+.bench-col { border-top: 1px solid var(--border); padding-top: 8px; font-size: 13px; min-width: 0; }
+.bench-col-head { margin-bottom: 6px; }
+.bench-col .bench-out { max-height: 520px; }
+@media (max-width: 900px) { .bench-side { grid-template-columns: minmax(0, 1fr); } }
