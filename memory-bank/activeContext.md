@@ -1,11 +1,20 @@
 # Active Context
 
-_Last updated: 2026-10-12_
+_Last updated: 2026-10-18_
 
 ## Current focus
 **Deployed and live** on the user's cluster: namespace `agent-spawner`, console at http://192.168.1.64:30880 (NodePort 30880 on any node). See deployment.md for every detail. Next steps depend on the user.
 
 ## Recent changes
+### 2026-10-18: worker directive, chat search auto, mobile pass (0.1.49, branch `feat/chat-search-auto-mobile`, builds on PR #19)
+- Trigger: chat 79829bc6 (turkey + hunting tag): the model refused lawful hunting and invented "Oklahoma prohibits crossbows for turkey" with an ODWC citation (false: ODWC regs p.44 and 29 O.S. §5-213 allow crossbows wherever longbows are legal).
+- `DefaultWorkerDirective`: explain lawful activities (hunting, butchering, shooting, brewing...) fully, no refusing or lecturing; place- and time-dependent facts (laws, seasons, prices) only from sources, else hedged with where to check; never conclude from memory that something is illegal; never cite a document not given. Live settings updated to v9 via PUT /v1/settings.
+- Search auto: `settings.SearchAuto` / `createRequest.search_auto`; chat `search_mode` auto (default) | on | off. In auto the query writer's schema has a required `search_needed` boolean before `queries` — a prompt-only "return an empty list" rule was ignored by qwen3.5-9b (it searched for "tips for smoking turkey legs").
+- Chat composer: "Fetch links" checkbox removed (always on); Search is a segmented Auto/On/Off control (`.mode*` classes — `.seg` is taken by the timeline bars, which collapsed it to 14 px); choices kept in localStorage (`chat.search`, `chat.deep`).
+- Mobile audit (Playwright, 390 and 360 px, every page): 16 px inputs (no iOS zoom), ≥40 px tap targets, two-row top bar under 700 px, endpoint rows stack, chat fills 100dvh with the composer visible, no autofocus on touch devices. Zero horizontal overflow.
+- `TestDenseTextCalibratesAdmission` pins a short worker directive so default-directive length can't change its sizing.
+- Integration tests: use the `spawner-test-pg` (55432) / `spawner-test-nats` (54222) containers; `make test-integration` runs `docker compose up` on 5432/4222 instead.
+
 ### 2026-10-18: Chat tab, a conversational agent (0.1.42, branch `feat/chat`)
 - Nav: Chat before Runs (Runs stays the default route). Migration 009: `chat_conversation` (owner, title), `chat_message` (role, content, tree_id), `agent_tree.history` jsonb.
 - Each reply is a run: `settings.History []Turn` (stored in agent_tree.history) — the root exec gets the turns as real chat messages; planner, merge and the search query writer get a "Conversation so far" block. Chat defaults to max_depth 0 (one agent); "Agent pool" (deep) uses the saved depth.

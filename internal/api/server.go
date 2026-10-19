@@ -110,6 +110,9 @@ type createRequest struct {
 	// Search runs a web search before planning and gives every agent the
 	// results (needs SEARCH_URL on the server).
 	Search bool `json:"search,omitempty"`
+	// SearchAuto searches only when the question needs current or local
+	// facts (the local model decides). Ignored without a search backend.
+	SearchAuto bool `json:"search_auto,omitempty"`
 
 	// softFetch (chat): a link that cannot be fetched becomes a note for
 	// the agent instead of failing the request.
@@ -211,6 +214,8 @@ func (s *Server) startRun(ctx context.Context, req createRequest, history []sett
 			return nil, uuid.Nil, badRequest("web search is not configured on this server (set SEARCH_URL or EXA_API_KEY)")
 		}
 		set.Search = true
+	} else if req.SearchAuto && s.SearchEnabled {
+		set.Search, set.SearchAuto = true, true
 	}
 
 	started, err := agent.StartTree(ctx, s.db, s.river, agent.TreeRequest{

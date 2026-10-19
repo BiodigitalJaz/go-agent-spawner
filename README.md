@@ -44,7 +44,9 @@ GET /v1/trees/{id}/events ◄── SSE from NATS (replay + Last-Event-ID resume
 ### Chat
 
 The **Chat** tab is a conversational agent. Each reply is a run whose root agent sees the conversation so far (as chat turns), so chat uses the same pool, models and live streaming as runs.
-- **Options per message:** "Fetch links" (on; links in your message are read, and a link that can't be opened is reported instead of failing the message), "Search the web" (when a search backend is configured) and "Agent pool" (lets the planner split the reply across parallel agents; one agent answers by default, which is fastest).
+- **Links** in your message are always read; a link that can't be opened is reported in the reply instead of failing the message.
+- **Search** (shown when a search backend is configured): **Auto** (the default) lets the model decide per message, searching only when the answer depends on current or local facts such as regulations, seasons, prices or schedules; **On** always searches; **Off** never does. Auto keeps general questions (how-tos, explanations, code) off the search quota.
+- **Agent pool** lets the planner split the reply across parallel agents; one agent answers by default, which is fastest. The Search and Agent pool choices are remembered in the browser.
 - **Each reply** links to its run ("View run") for the agents, timeline and timings.
 - **Conversations** are stored in Postgres and belong to the account (or token) that created them. Long conversations keep the newest turns that fit about 30% of the worker model's context; older ones are left out and the reply says so. Deleting a conversation also purges its runs.
 
@@ -135,7 +137,7 @@ parallelism the server allows.
 | POST / PUT / DELETE | `/v1/models[/{name}]` | Add, edit or remove console-managed models. Workers pick changes up within seconds. Delete is refused while the model is in use (by settings, a running tree, or queued jobs) |
 | GET / POST | `/v1/chats` | List your conversations / create one (`{"title"?}`) |
 | GET / PATCH / DELETE | `/v1/chats/{id}` | A conversation with its messages (a reply's text and status come from its run) / rename (`{"title"}`) / delete it and purge its runs |
-| POST | `/v1/chats/{id}/messages` | `{"content", "search"?, "fetch_urls"? (default true), "deep"?, "model"?}` → `{tree_id, events_url, user_message_id, assistant_message_id, history_note?, fetched?}`. Starts the reply's run with the conversation so far; stream it from `events_url`. 409 while the previous reply is still being written |
+| POST | `/v1/chats/{id}/messages` | `{"content", "search_mode"? ("auto" default, "on", "off"), "fetch_urls"? (default true), "deep"?, "model"?}` (`"search": true` still means "on") → `{tree_id, events_url, user_message_id, assistant_message_id, history_note?, fetched?}`. Starts the reply's run with the conversation so far; stream it from `events_url`. 409 while the previous reply is still being written |
 | GET | `/v1/discovery[?url=]` | Models offered by each backend host (LM Studio: size, quantization, load state, parallel slots, reasoning options) |
 | POST | `/v1/discovery/load`, `/v1/discovery/unload` | LM Studio only: `{url, model, context_length?}` / `{url, instance_id}` |
 

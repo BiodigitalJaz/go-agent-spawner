@@ -470,3 +470,58 @@ details.thinking.live summary .lbl::after { content: "…"; animation: pulse 1.2
 /* Tables keep whole words and scroll sideways in their own box. */
 .bubble .md-table th, .bubble .md-table td { overflow-wrap: normal; word-break: normal; }
 .bubble .md-table a { overflow-wrap: break-word; }
+
+/* Segmented control (chat search mode) */
+.mode { display: inline-flex; align-items: center; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; font-size: 13px; }
+.mode-label { padding: 0 10px; color: var(--muted); }
+.mode-btn { border: none; border-left: 1px solid var(--border); background: none; color: inherit; padding: 7px 12px; cursor: pointer; min-height: 36px; font: inherit; }
+.mode-btn[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); font-weight: 600; }
+.mode-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* ---------- Phones and tablets ---------- */
+@media (max-width: 900px), (pointer: coarse) {
+  /* iOS zooms the page when a field under 16px gets focus. */
+  /* !important: beats the compact sizes set for specific editors. */
+  input:not([type=checkbox]):not([type=radio]):not([type=range]), select, textarea { font-size: 16px !important; }
+  select { min-height: 40px; }
+  /* Finger-sized targets (about 40px). */
+  .icon-btn { width: 40px; height: 40px; }
+  .btn { min-height: 40px; }
+  .btn.small { min-height: 36px; padding: 6px 12px; font-size: 13px; }
+  input[type=checkbox] { width: 20px; height: 20px; }
+  .check, .chat-opts .check { min-height: 36px; }
+  details > summary { padding: 10px 0; }
+  button.link { padding: 8px 4px; min-height: 32px; }
+  .mode-btn { min-height: 40px; padding: 8px 14px; }
+  .chat-item { padding: 12px; }
+  /* Model endpoint rows wrap instead of overflowing the card. */
+  .ep-row { grid-template-columns: minmax(0, 1fr) minmax(0, 120px) auto; }
+  .ep-row .mono { overflow-wrap: anywhere; }
+}
+
+@media (max-width: 700px) {
+  /* Two-row top bar: brand and controls, then the tabs across the width. */
+  .topbar { flex-wrap: wrap; height: auto; padding: 6px 12px 0; gap: 6px 12px; }
+  .brand span { display: none; }
+  .vitals { order: 2; }
+  .tabs { order: 3; flex-basis: 100%; height: 44px; justify-content: space-between; }
+  .tabs a { flex: 1; justify-content: center; padding: 0 6px; }
+  .runs, .chat { height: auto; }
+  .chat-main { height: calc(100vh - 104px); }
+  .ep-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .ep-row > :nth-child(2) { grid-column: 1 / -1; grid-row: 2; }
+}
+@media (max-width: 700px) {
+  /* Chat fills exactly the screen: a short conversation strip, the thread
+     scrolling in the middle, and the message box always visible. */
+  .chat { display: flex; flex-direction: column; height: calc(100dvh - 100px); }
+  .chat .sidebar { flex: none; }
+  .chat-side-head { padding: 8px 12px; }
+  .chat-list { max-height: 18vh; flex: none; }
+  .chat-list .empty { padding: 8px 12px; }
+  .chat-main { flex: 1; min-height: 0; height: auto; }
+  .chat-head { padding: 8px 14px; }
+  .chat-thread { padding: 12px; }
+  .chat-compose { padding: 10px 12px; }
+  .chat-compose textarea { min-height: 52px; }
+}

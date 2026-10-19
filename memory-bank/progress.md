@@ -2,6 +2,11 @@
 
 ## Status: v0 and web console DEPLOYED to the andor cluster (2026-10-12), console on NodePort 30880
 
+
+## What works (verified 2026-10-18, 0.1.49): chat search auto and mobile
+- Search auto, five live chat questions: three how-tos (smoking turkey legs, field dressing, crossbow triggers) searched nothing; two place/time questions (OK turkey season, TX license price) searched. With today's date given to the query writer, queries say 2026 (previously 2024) and the OK season answer cited wildlifedepartment.com.
+- Directive v9 retest of the turkey chat: practical steps, no invented prohibition, advice to confirm with ODWC.
+- Mobile audit at 390/360 px, all pages: no overflow, no fonts under 16 px in inputs; the only flagged targets are 20 px checkboxes wrapped in their labels.
 ## Chunking experiment v2 (2026-10-12, code merge): see experiments/chunking/RESULTS.md (data: results_v2.json, 84 valid runs)
 - **The theory holds:** 4 chunks + `merge: list` is **51–65% faster** than a single context (4.1–6.9 s against 9.3–14.2 s), **21/21 perfect** recall, first result after 2.6 s (single: 11.2 s), and works past the context (65k tokens in 12.6 s). 8 chunks is slower than 4. The LLM merge stays ~40% slower than single (it re-generates the answer).
 - Bugs found by "perform all tests" and fixed: (1) 0.1.4 classified LM Studio's transient shared-context overflow (500) as permanent → v2 lost chunks at 43k/65k → fixed in 0.1.7 (error precedence + ContextPressure snooze + token-budgeted admission via `shared_context`); (2) 0.1.7's estimate-based ErrTooLarge rejected a 28k request → removed in 0.1.8; (3) the AIMD latency signal under-used known slots → `IgnoreLatency` when slots are set (0.1.6); (4) rollouts refused connections → preStop sleep 5 s (331/331 OK during restart).
