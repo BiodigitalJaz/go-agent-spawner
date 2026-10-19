@@ -115,6 +115,17 @@ func FinishBenchmark(ctx context.Context, db DBTX, id uuid.UUID, status string, 
 	return err
 }
 
+// UpdateBenchmarkResults replaces a finished benchmark's results (a
+// re-analysis), leaving its status alone.
+func UpdateBenchmarkResults(ctx context.Context, db DBTX, id uuid.UUID, results any) error {
+	res, err := json.Marshal(results)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(ctx, `UPDATE benchmark SET results = $2 WHERE id = $1`, id, res)
+	return err
+}
+
 // RequestBenchmarkCancel marks a running benchmark for cancellation; the
 // runner stops at its next check.
 func RequestBenchmarkCancel(ctx context.Context, db DBTX, id uuid.UUID, owner string) error {

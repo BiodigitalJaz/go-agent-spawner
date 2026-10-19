@@ -76,6 +76,7 @@ type benchConfig struct {
 
 type benchCase struct {
 	Prompt     string          `json:"prompt"`
+	Category   string          `json:"category,omitempty"`
 	Sources    bool            `json:"sources"` // the original reply had reference material
 	SourceTree uuid.UUID       `json:"source_tree"`
 	context    string          // reference material, as the original reply saw it
@@ -102,6 +103,11 @@ type benchAnswer struct {
 	// number they quote is in the reference (judge false positives).
 	JudgeDropped int       `json:"judge_dropped,omitempty"`
 	FinishedAt   time.Time `json:"finished_at,omitzero"`
+	// Figures in the answer (numbers worth checking) and how many appear
+	// in the case's sources; Unsourced lists the others.
+	Figures        int      `json:"figures,omitempty"`
+	FiguresSourced int      `json:"figures_sourced,omitempty"`
+	Unsourced      []string `json:"unsourced,omitempty"`
 }
 
 type benchModel struct {
@@ -121,7 +127,14 @@ type benchModel struct {
 	// RanAtOnce is the most answers that were being generated at the same
 	// time (from each answer's generation interval). Below Parallel, the
 	// backend has fewer slots than asked for and Total tok/s understates it.
-	RanAtOnce int `json:"ran_at_once,omitempty"`
+	RanAtOnce int     `json:"ran_at_once,omitempty"`
+	MinTPS    float64 `json:"min_tps,omitempty"`
+	MaxTPS    float64 `json:"max_tps,omitempty"`
+	P90TTFTMs int64   `json:"p90_ttft_ms,omitempty"`
+	AvgTokens int     `json:"avg_tokens,omitempty"`
+	// Figures across answers to cases with sources (see benchAnswer).
+	Figures        int `json:"figures,omitempty"`
+	FiguresSourced int `json:"figures_sourced,omitempty"`
 	// Scores, from the judge.
 	Answered    int `json:"answered"`
 	Refusals    int `json:"refusals"`
@@ -138,6 +151,9 @@ type benchResults struct {
 	Notes  []string     `json:"notes,omitempty"`
 	Trees  []uuid.UUID  `json:"trees"` // every run the benchmark started, purged with it
 	ChatID *uuid.UUID   `json:"chat_id,omitempty"`
+	// Analysis is the written summary (see analyze).
+	Analysis        []string `json:"analysis,omitempty"`
+	AnalysisVersion int      `json:"analysis_version,omitempty"`
 }
 
 func benchID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
@@ -189,6 +205,17 @@ func (s *Server) getBenchmark(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	// Benchmarks finished before the current analysis get it now (once).
+	var res benchResults
+	if !b.Active() && b.Status == "done" && json.Unmarshal(b.Results, &res) == nil && res.AnalysisVersion < analysisVersion && len(res.Cases) > 0 {
+		analyze(&res, s.caseContexts(r.Context(), res.Cases))
+		if data, err := json.Marshal(res); err == nil {
+			b.Results = data
+			if err := store.UpdateBenchmarkResults(r.Context(), s.db, b.ID, res); err != nil {
+				s.log.Warn("save benchmark analysis", "benchmark", b.ID, "err", err)
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, b)
 }
@@ -460,7 +487,15 @@ func (b *benchRun) steps(ctx context.Context) error {
 		b.judge(ctx, i, cases)
 		b.update(func(r *benchResults) { r.Models[i].Status = "done" })
 	}
-	return ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	contexts := make([]string, len(cases))
+	for i, c := range cases {
+		contexts[i] = c.context
+	}
+	b.update(func(r *benchResults) { analyze(r, contexts) })
+	return nil
 }
 
 // cases builds the replay cases from the chat: every user message whose
