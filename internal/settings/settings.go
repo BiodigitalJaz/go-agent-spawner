@@ -56,6 +56,10 @@ type Settings struct {
 	// (per run; chat turns it on): fees, numbers, dates and requirements
 	// the sources do not support are removed or marked unverified.
 	SourceCheck bool `json:"source_check,omitempty"`
+	// ResponseSchema, when set, constrains the root agent's answer to this
+	// JSON schema (per run; the benchmark judge uses it so its grade always
+	// parses).
+	ResponseSchema json.RawMessage `json:"response_schema,omitempty"`
 	// PartMaxWords is the per-part answer cap asked of each part's agent
 	// (per run). Admission reserves room for about that many words instead
 	// of a full max_tokens, so more parts fit a shared context at once.

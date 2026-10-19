@@ -559,3 +559,7 @@ details.thinking.live summary .lbl::after { content: "…"; animation: pulse 1.2
   .bench-grid { grid-template-columns: minmax(0, 1fr); }
   .bench-run { flex-wrap: wrap; }
 }
+.bench-table td.warn { color: var(--c-waiting); }
+.bench-suite { font-size: 12.5px; }
+.bench-suite summary { cursor: pointer; color: var(--muted); }
+.bench-suite ol { margin: 6px 0 8px; padding-left: 22px; }

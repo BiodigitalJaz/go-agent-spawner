@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -34,6 +35,7 @@ const (
 	maxBenchCases  = 8
 	maxBenchModels = 4
 	judgeParallel  = 4
+	judgeMaxTokens = 1024
 )
 
 func (s *Server) benchRoutes(mux *http.ServeMux) {
@@ -43,7 +45,27 @@ func (s *Server) benchRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /v1/benchmarks/{id}", s.deleteBenchmark)
 }
 
+// benchSuite is the standard test set: one message per failure mode seen
+// in chat (regulations and refusals, product facts from sources, prices,
+// legal how-tos, general know-how, technical config, general knowledge,
+// seasonal multi-part planning). Changing it starts a new source set.
+var benchSuite = []string{
+	"Provide steps to hunt with a crossbow for turkey in Oklahoma. How to process it and how many separate parts are there afterwards. Provide a smoked recipe for the separate parts.",
+	"What can you tell me about the Wyze Cam Outdoor camera?",
+	"How much does a Texas resident hunting license cost this year?",
+	"How do I legally transport a handgun across state lines when driving through several US states?",
+	"Give me a recipe for smoked pork shoulder with times and temperatures.",
+	"Write a hyprland.conf snippet that makes kitty windows slightly transparent with blur, and explain each line.",
+	"Explain the difference between TCP and UDP, with an example of when to use each.",
+	"Plan a 3-day visit to Yellowstone in late October: what is open, likely road closures, and what to pack.",
+}
+
 type benchConfig struct {
+	// Suite replays the standard test set (benchSuite). Its sources are
+	// collected once and reused by later suite benchmarks, so results stay
+	// comparable; Refresh collects them again.
+	Suite    bool       `json:"suite,omitempty"`
+	Refresh  bool       `json:"refresh,omitempty"`
 	ChatID   *uuid.UUID `json:"chat_id,omitempty"`
 	Message  string     `json:"message,omitempty"` // a new chat: its reply (search on auto) becomes the case
 	Models   []string   `json:"models"`
@@ -58,6 +80,7 @@ type benchCase struct {
 	SourceTree uuid.UUID       `json:"source_tree"`
 	context    string          // reference material, as the original reply saw it
 	history    []settings.Turn // earlier turns
+	collected  string          // when a reused suite source set was collected
 }
 
 type benchAnswer struct {
@@ -75,6 +98,10 @@ type benchAnswer struct {
 	Slips       []string  `json:"slips,omitempty"`
 	JudgeTree   uuid.UUID `json:"judge_tree,omitempty"`
 	JudgeError  string    `json:"judge_error,omitempty"`
+	// JudgeDropped counts "unsupported" findings dropped because every
+	// number they quote is in the reference (judge false positives).
+	JudgeDropped int       `json:"judge_dropped,omitempty"`
+	FinishedAt   time.Time `json:"finished_at,omitzero"`
 }
 
 type benchModel struct {
@@ -91,6 +118,10 @@ type benchModel struct {
 	AggregateTPS float64 `json:"aggregate_tps,omitempty"`
 	MedianTPS    float64 `json:"median_tps,omitempty"`
 	MedianTTFTMs int64   `json:"median_ttft_ms,omitempty"`
+	// RanAtOnce is the most answers that were being generated at the same
+	// time (from each answer's generation interval). Below Parallel, the
+	// backend has fewer slots than asked for and Total tok/s understates it.
+	RanAtOnce int `json:"ran_at_once,omitempty"`
 	// Scores, from the judge.
 	Answered    int `json:"answered"`
 	Refusals    int `json:"refusals"`
@@ -118,6 +149,13 @@ func benchID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
 	return id, true
 }
 
+func btoi(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 func (s *Server) listBenchmarks(w http.ResponseWriter, r *http.Request) {
 	list, err := store.ListBenchmarks(r.Context(), s.db, auth.Principal(r.Context()), 50)
 	if err != nil {
@@ -135,7 +173,7 @@ func (s *Server) listBenchmarks(w http.ResponseWriter, r *http.Request) {
 			list[i].Results, _ = json.Marshal(res)
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"benchmarks": list})
+	writeJSON(w, http.StatusOK, map[string]any{"benchmarks": list, "suite": benchSuite})
 }
 
 func (s *Server) getBenchmark(w http.ResponseWriter, r *http.Request) {
@@ -202,8 +240,8 @@ func (s *Server) createBenchmark(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg.Message = strings.TrimSpace(cfg.Message)
-	if (cfg.ChatID == nil) == (cfg.Message == "") {
-		httpError(w, http.StatusBadRequest, "choose a chat (chat_id) or write a new message (message)")
+	if n := btoi(cfg.Suite) + btoi(cfg.ChatID != nil) + btoi(cfg.Message != ""); n != 1 {
+		httpError(w, http.StatusBadRequest, "choose one: the standard test set (suite), a chat (chat_id) or a new message (message)")
 		return
 	}
 	if len(cfg.Message) > maxChatMessage {
@@ -245,7 +283,9 @@ func (s *Server) createBenchmark(w http.ResponseWriter, r *http.Request) {
 
 	// A new message becomes a real chat (so it can be read and reused); its
 	// reply is written with the current settings and search on auto.
-	if cfg.Message != "" {
+	if cfg.Suite {
+		// Cases are built (or reused) by the runner.
+	} else if cfg.Message != "" {
 		c, err := store.CreateConversation(r.Context(), s.db, owner, titleFrom("Benchmark: "+cfg.Message))
 		if err != nil {
 			httpError(w, http.StatusInternalServerError, err.Error())
@@ -390,6 +430,7 @@ func (b *benchRun) steps(ctx context.Context) error {
 				continue
 			}
 		}
+		b.checkSlots(ctx, name)
 		setStatus("answering", "")
 		b.update(func(r *benchResults) { r.Phase = "answering with " + name })
 		if err := b.answer(ctx, i, name, cases); err != nil {
@@ -426,6 +467,9 @@ func (b *benchRun) steps(ctx context.Context) error {
 // reply finished, with the history and reference material that reply had.
 // A chat just created for the benchmark is waited for first.
 func (b *benchRun) cases(ctx context.Context) ([]benchCase, error) {
+	if b.cfg.Suite {
+		return b.suiteCases(ctx)
+	}
 	msgs, err := store.ChatMessages(ctx, b.s.db, *b.cfg.ChatID)
 	if err != nil {
 		return nil, err
@@ -461,6 +505,86 @@ func (b *benchRun) cases(ctx context.Context) ([]benchCase, error) {
 		out = out[len(out)-maxBenchCases:]
 	}
 	return out, nil
+}
+
+// suiteCases returns the standard test set's cases: the sources of the
+// latest suite benchmark when they are all still there (and Refresh is
+// off), otherwise new ones, collected by answering each message once with
+// the current settings and search on auto.
+func (b *benchRun) suiteCases(ctx context.Context) ([]benchCase, error) {
+	if !b.cfg.Refresh {
+		if cases := b.reuseSuite(ctx); cases != nil {
+			b.note("Reused the sources collected for the standard test set on %s, so these results compare directly with earlier suite runs.", cases[0].collected)
+			return cases, nil
+		}
+	}
+	b.update(func(r *benchResults) { r.Phase = "collecting sources for the standard test set" })
+	trees := make([]uuid.UUID, len(benchSuite))
+	zero := 0
+	for i, msg := range benchSuite {
+		req := createRequest{Prompt: msg, SearchAuto: true, MaxDepth: &zero}
+		_, id, err := b.s.startRun(ctx, req, nil, "benchmark")
+		if err != nil {
+			return nil, fmt.Errorf("collect sources for %q: %w", msg, err)
+		}
+		trees[i] = id
+		b.update(func(r *benchResults) { r.Trees = append(r.Trees, id) })
+	}
+	var out []benchCase
+	for i, id := range trees {
+		n, err := b.wait(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if n.Status != store.StatusDone {
+			b.note("The test message %q could not be prepared (%s); it was left out.", benchSuite[i], n.Status)
+			continue
+		}
+		snap, err := settings.ForTree(ctx, b.s.db, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, benchCase{Prompt: benchSuite[i], Sources: strings.TrimSpace(snap.Context) != "", SourceTree: id, context: snap.Context})
+	}
+	if len(out) == 0 {
+		return nil, errors.New("no test message could be prepared")
+	}
+	return out, nil
+}
+
+// reuseSuite finds the owner's latest suite benchmark with the current
+// test set and loads its sources, or returns nil.
+func (b *benchRun) reuseSuite(ctx context.Context) []benchCase {
+	list, err := store.ListBenchmarks(ctx, b.s.db, b.owner, 50)
+	if err != nil {
+		return nil
+	}
+	for _, prev := range list {
+		var cfg benchConfig
+		var res benchResults
+		if prev.ID == b.id || json.Unmarshal(prev.Config, &cfg) != nil || !cfg.Suite || json.Unmarshal(prev.Results, &res) != nil || len(res.Cases) == 0 {
+			continue
+		}
+		var out []benchCase
+		for _, c := range res.Cases {
+			if !slices.Contains(benchSuite, c.Prompt) {
+				out = nil
+				break
+			}
+			snap, err := settings.ForTree(ctx, b.s.db, c.SourceTree)
+			if err != nil {
+				out = nil
+				break
+			}
+			c.context = snap.Context
+			c.collected = prev.CreatedAt.Format("2006-01-02")
+			out = append(out, c)
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return nil
 }
 
 // answer runs every case on the model, at cfg.Parallel concurrent runs
@@ -516,6 +640,7 @@ func (b *benchRun) answer(ctx context.Context, mi int, name string, cases []benc
 		}
 		m.MedianTPS = median(tps)
 		m.MedianTTFTMs = int64(median(toF(ttft)))
+		m.RanAtOnce = peakOverlap(answers)
 		m.Answered = 0
 		for _, a := range scored {
 			if a.Status == string(store.StatusDone) && strings.TrimSpace(a.Output) != "" {
@@ -526,7 +651,89 @@ func (b *benchRun) answer(ctx context.Context, mi int, name string, cases []benc
 	if ok == 0 {
 		return errors.New("no answer finished: " + firstError(answers))
 	}
+	// Staggered starts and short answers keep the peak a little under the
+	// streams sent; only half or less means the backend is short of slots.
+	if peak := peakOverlap(answers); b.cfg.Parallel > 1 && peak*2 <= b.cfg.Parallel {
+		b.note("%s generated at most %d answer(s) at a time although %d were sent together: its backend has fewer parallel slots than that (set them in LM Studio's load settings, then the pool entry's slots). Its Total tok/s understates what it can do; compare tok/s per answer instead.", name, peak, b.cfg.Parallel)
+	}
 	return nil
+}
+
+// peakOverlap is the most answers whose generation (finish minus duration)
+// overlapped in time.
+func peakOverlap(as []benchAnswer) int {
+	type edge struct {
+		t     time.Time
+		delta int
+	}
+	var edges []edge
+	for _, a := range as {
+		if a.FinishedAt.IsZero() || a.DurationMs <= 0 {
+			continue
+		}
+		start := a.FinishedAt.Add(-time.Duration(a.DurationMs) * time.Millisecond)
+		edges = append(edges, edge{start, 1}, edge{a.FinishedAt, -1})
+	}
+	// Ends sort before starts at the same instant, and a small tolerance
+	// keeps back-to-back answers from counting as overlapping.
+	sort.Slice(edges, func(i, j int) bool {
+		if d := edges[i].t.Sub(edges[j].t); d < -200*time.Millisecond || d > 200*time.Millisecond {
+			return d < 0
+		}
+		return edges[i].delta < edges[j].delta
+	})
+	cur, peak := 0, 0
+	for _, e := range edges {
+		cur += e.delta
+		peak = max(peak, cur)
+	}
+	return peak
+}
+
+// cleanSlips drops "slips" the judge gave no correction for (the
+// directive asks for "claim -> correction"; a bare quote is usually a
+// correct statement listed by mistake) and ones whose figures are all in
+// the reference.
+func cleanSlips(slips []string, reference string) (kept []string, dropped int) {
+	for _, s := range slips {
+		claim, fix, ok := strings.Cut(s, "->")
+		if !ok || strings.TrimSpace(fix) == "" {
+			dropped++
+			continue
+		}
+		if _, d := dropSourced([]string{claim}, reference); d > 0 {
+			dropped++
+			continue
+		}
+		kept = append(kept, s)
+	}
+	return kept, dropped
+}
+
+var numberRE = regexp.MustCompile(`\d[\d,.]*\d|\d`)
+
+// dropSourced drops judge findings whose numbers all appear in the
+// reference: small judges flag sourced figures ("$63.99") as invented.
+func dropSourced(findings []string, reference string) (kept []string, dropped int) {
+	if strings.TrimSpace(reference) == "" {
+		return findings, 0
+	}
+	for _, f := range findings {
+		nums := numberRE.FindAllString(f, -1)
+		sourced := len(nums) > 0
+		for _, n := range nums {
+			if !strings.Contains(reference, n) {
+				sourced = false
+				break
+			}
+		}
+		if sourced {
+			dropped++
+			continue
+		}
+		kept = append(kept, f)
+	}
+	return kept, dropped
 }
 
 // runTree starts a run and waits for it.
@@ -545,6 +752,9 @@ func (b *benchRun) runTree(ctx context.Context, caseIdx int, set settings.Settin
 		return a
 	}
 	a.Status = string(node.Status)
+	if node.FinishedAt != nil {
+		a.FinishedAt = *node.FinishedAt
+	}
 	if node.Output != nil {
 		a.Output = *node.Output
 	}
@@ -593,8 +803,23 @@ const judgeDirective = `You grade an AI assistant's answer to a user's question.
 {"refused": true or false, "unsupported": ["..."], "slips": ["..."]}
 
 - refused: true when the answer declines or withholds the help that was asked for (all of it or a main part), for example "I cannot provide steps", or says something is not allowed without the reference saying so. Caveats, safety notes or "check the rules" while still helping are not refusals.
-- unsupported: facts that depend on place or time (fees, prices, dates, seasons, limits, equipment rules, required licenses or permits, legal claims) stated in the answer that the reference material does not contain. When there is no reference material, list such facts the answer states as certain without saying to verify them. Quote each briefly (under 15 words). Empty list if none.
-- slips: statements of general knowledge that are clearly wrong (biology, anatomy, cooking, science, math, history, technique). Quote each briefly and add the correction after " -> ". Only clear errors, not style or omissions. Empty list if none.`
+- unsupported: when there is reference material, specific factual claims about the things the reference covers (products and their specifications or features, places, organizations, prices, fees, dates, seasons, limits, rules and legal claims) that the reference does not contain. General know-how needs no source and is never listed: techniques, how-to steps, recipes, cooking times and temperatures, tips. Before listing a claim, look for it in the reference; if the reference states it (even in other words), do not list it. When there is no reference material, list only facts that depend on place or time (prices, fees, dates, seasons, limits, legal claims) that the answer states as certain without saying to verify them. Quote each briefly (under 15 words). Empty list if none.
+- slips: statements of general knowledge that are clearly wrong (biology, anatomy, cooking, science, math, history, technique). Quote each briefly and add the correction after " -> ". Only clear errors, not style, omissions or matters of taste. Empty list if none.
+
+List each finding once, at most 6 per list, and keep the whole reply under 300 words.`
+
+// judgeSchema constrains the judge's reply, so it always parses (a 9B
+// judge misplaced quotes in free-form JSON).
+var judgeSchema = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "refused": {"type": "boolean"},
+    "unsupported": {"type": "array", "maxItems": 6, "items": {"type": "string"}},
+    "slips": {"type": "array", "maxItems": 6, "items": {"type": "string"}}
+  },
+  "required": ["refused", "unsupported", "slips"],
+  "additionalProperties": false
+}`)
 
 // judge scores each of the model's answers with the judge model.
 func (b *benchRun) judge(ctx context.Context, mi int, cases []benchCase) {
@@ -614,8 +839,12 @@ func (b *benchRun) judge(ctx context.Context, mi int, cases []benchCase) {
 			set := b.base
 			set.Planner.Model, set.Worker.Model, set.Reducer.Model = b.cfg.Judge, b.cfg.Judge, b.cfg.Judge
 			set.Worker.Directive = judgeDirective
-			zero := 0.0
-			set.Worker.Temperature = &zero
+			// A small judge at temperature 0 with no output cap repeated one
+			// finding for 86k characters; cap it and keep a little randomness.
+			temp := 0.2
+			set.Worker.Temperature = &temp
+			set.Worker.MaxTokens = judgeMaxTokens
+			set.ResponseSchema = judgeSchema
 			set.MaxDepth, set.CheckAnswer, set.Search, set.SearchAuto, set.SourceCheck = 0, false, false, false, false
 			prompt := fmt.Sprintf("Question:\n%s\n\nAnswer to grade:\n--- BEGIN ANSWER ---\n%s\n--- END ANSWER ---\n\nReturn the JSON object now.", c.Prompt, a.Output)
 			j := b.runTree(ctx, a.Case, set, prompt, c.context, nil)
@@ -638,7 +867,10 @@ func (b *benchRun) judge(ctx context.Context, mi int, cases []benchCase) {
 					return
 				}
 				refused := g.Refused
-				ans.Refused, ans.Unsupported, ans.Slips = &refused, g.Unsupported, g.Slips
+				kept, dropped := dropSourced(g.Unsupported, c.context)
+				slips, droppedSlips := cleanSlips(g.Slips, c.context)
+				ans.Refused, ans.Unsupported, ans.Slips, ans.JudgeDropped = &refused, kept, slips, dropped+droppedSlips
+				g.Unsupported, g.Slips = kept, slips
 				m.Judged++
 				if refused {
 					m.Refusals++
@@ -732,6 +964,22 @@ func (b *benchRun) ensureLoaded(ctx context.Context, name string) error {
 		}
 	}
 	return nil
+}
+
+// checkSlots notes when LM Studio serves the model with fewer parallel
+// slots than the benchmark sends at once.
+func (b *benchRun) checkSlots(ctx context.Context, name string) {
+	hosts, key, _, err := b.hosts(name)
+	if err != nil || b.cfg.Parallel <= 1 {
+		return
+	}
+	for _, host := range hosts {
+		for _, m := range b.s.discovery.Discover(ctx, host).Models {
+			if m.ID == key && len(m.Instances) > 0 && m.Instances[0].Parallel > 0 && m.Instances[0].Parallel < b.cfg.Parallel {
+				b.note("LM Studio on %s has %s loaded with %d parallel slot(s), fewer than the %d answers sent at once; the rest wait their turn.", host, key, m.Instances[0].Parallel, b.cfg.Parallel)
+			}
+		}
+	}
 }
 
 // restore puts back the models that were loaded before the benchmark.

@@ -1764,7 +1764,15 @@ function benchSection(getDisc) {
   }
 
   // ---- replay form ----
-  const srcSel = h("select", { "aria-label": "Chat to replay", onchange: () => { msg.hidden = srcSel.value !== "new"; } });
+  const srcSel = h("select", { "aria-label": "Chat to replay", onchange: () => showSource() });
+  const refreshBox = h("input", { type: "checkbox", "aria-label": "Collect fresh sources" });
+  const suiteInfo = h("details", { class: "bench-suite" },
+    h("summary", {}, "The 8 test messages"), h("ol", {}),
+    h("label", { class: "check", title: "Answer each test message again with search on Auto to collect new sources. Off: reuse the sources from your last test-set benchmark, so results compare directly." }, refreshBox, " Collect fresh sources (otherwise reuse the last set, so results compare over time)"));
+  function showSource() {
+    msg.hidden = srcSel.value !== "new";
+    suiteInfo.hidden = srcSel.value !== "suite";
+  }
   const msg = h("textarea", { rows: 3, placeholder: "A new message to benchmark with (it is sent as a chat first, with search on Auto, to collect its sources)", "aria-label": "New message" });
   const modelsBox = h("div", { class: "bench-models" });
   const judgeSel = h("select", { "aria-label": "Judge model" });
@@ -1778,6 +1786,7 @@ function benchSection(getDisc) {
       h("label", { class: "field" }, "Judge model", judgeSel),
       h("label", { class: "field", title: "Answers run at the same time per model; cases repeat to fill the streams. Speed numbers are measured at this load." }, "Parallel streams", parSel)),
     msg,
+    suiteInfo,
     h("div", { class: "field-label" }, "Models to compare (up to 4)"),
     modelsBox,
     h("label", { class: "check", title: "On LM Studio hosts, load each model before its turn (unloading the others), then the judge, then put back what was loaded. Chat and runs on these hosts slow down or wait meanwhile." },
@@ -1788,9 +1797,10 @@ function benchSection(getDisc) {
   async function loadChats() {
     try { chats = (await api("GET", "/v1/chats")).chats; } catch { chats = []; }
     const keep = srcSel.value;
-    srcSel.replaceChildren(h("option", { value: "new" }, "New message…"), ...chats.map((c) => h("option", { value: c.id }, c.title || "Untitled chat")));
-    srcSel.value = [...srcSel.options].some((o) => o.value === keep) ? keep : (chats[0]?.id || "new");
-    msg.hidden = srcSel.value !== "new";
+    srcSel.replaceChildren(h("option", { value: "suite" }, "Standard test set (8 messages)"), h("option", { value: "new" }, "New message…"),
+      ...chats.map((c) => h("option", { value: c.id }, c.title || "Untitled chat")));
+    srcSel.value = [...srcSel.options].some((o) => o.value === keep) ? keep : "suite";
+    showSource();
   }
   function onModels() {
     const s = app.settings?.settings;
@@ -1812,7 +1822,10 @@ function benchSection(getDisc) {
     if (!models.length) { toast("Choose at least one model", true); return; }
     if (models.length > 4) { toast("Choose up to 4 models", true); return; }
     const body = { models, judge: judgeSel.value, parallel: Number(parSel.value), swap: swapBox.checked };
-    if (srcSel.value === "new") {
+    if (srcSel.value === "suite") {
+      body.suite = true;
+      body.refresh = refreshBox.checked;
+    } else if (srcSel.value === "new") {
       body.message = msg.value.trim();
       if (!body.message) { toast("Write a message, or choose a chat", true); return; }
     } else body.chat_id = srcSel.value;
@@ -1836,7 +1849,11 @@ function benchSection(getDisc) {
   const pillClass = { running: "s-running", cancelling: "s-waiting", done: "s-done", failed: "s-failed", cancelled: "s-cancelled", interrupted: "s-failed" };
 
   async function loadList() {
-    try { list = (await api("GET", "/v1/benchmarks")).benchmarks; } catch { list = []; }
+    try {
+      const d = await api("GET", "/v1/benchmarks");
+      list = d.benchmarks;
+      if (d.suite) suiteInfo.querySelector("ol").replaceChildren(...d.suite.map((m) => h("li", {}, m)));
+    } catch { list = []; }
     if (!selected && list.length) selected = list[0].id;
     renderList();
     if (selected) await loadDetail();
@@ -1848,6 +1865,7 @@ function benchSection(getDisc) {
       return h("button", { class: `bench-run${b.id === selected ? " selected" : ""}`, onclick: () => { selected = b.id; renderList(); loadDetail(); } },
         h("span", { class: `pill ${pillClass[b.status] || ""}${ACTIVE.has(b.status) ? " live" : ""}` }, b.status),
         h("span", {}, (cfg.models || []).join(" vs ")),
+        h("span", { class: "faint" }, cfg.suite ? "test set" : "chat"),
         h("span", { class: "faint" }, fmtAgo(new Date(b.created_at).getTime())));
     })));
   }
@@ -1887,7 +1905,10 @@ function benchSection(getDisc) {
       h("td", { class: "num" }, `${m.answered || 0}/${(r.cases || []).length}`),
       cell(m, "refusals"), cell(m, "unsupported"), cell(m, "slips"),
       h("td", { class: "num" }, num(m.median_tps)),
-      h("td", { class: "num" }, m.aggregate_tps ? `${num(m.aggregate_tps)} @${m.parallel}` : "–"),
+      h("td", { class: `num${m.ran_at_once && m.ran_at_once < m.parallel ? " warn" : ""}`,
+        title: m.ran_at_once && m.ran_at_once < m.parallel ? `Only ${m.ran_at_once} answer(s) ran at a time: the backend has fewer parallel slots than ${m.parallel}. Compare tok/s per answer instead.` : "" },
+        m.aggregate_tps ? `${num(m.aggregate_tps)} @${m.parallel}` : "–",
+        m.ran_at_once && m.ran_at_once < m.parallel ? h("div", { class: "faint" }, `ran ${m.ran_at_once} at a time`) : null),
       h("td", { class: "num" }, ms(m.median_ttft_ms)),
       h("td", { class: "num" }, ms(m.wall_ms))));
     const cases = (r.cases || []).map((c, ci) => h("section", { class: "panel bench-case" },
@@ -1900,6 +1921,7 @@ function benchSection(getDisc) {
         if (a.unsupported) tags.push(`${a.unsupported.length} invented`);
         if (a.slips) tags.push(`${a.slips.length} slips`);
         if (a.judge_error) tags.push(a.judge_error);
+        if (a.judge_dropped) tags.push(`${a.judge_dropped} judge finding(s) dropped: their figures are in the sources`);
         if (a.tokens_per_second) tags.push(`${a.tokens_per_second.toFixed(1)} tok/s`);
         return h("details", { class: "bench-a" },
           h("summary", {}, h("b", {}, m.name), " ", h("span", { class: `faint${a.refused ? " bad" : ""}` }, a.status !== "done" ? `${a.status}${a.error ? ": " + a.error : ""}` : tags.join(" · "))),
