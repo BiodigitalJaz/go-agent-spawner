@@ -50,6 +50,53 @@ Same documents and seeds as v1, runs one at a time. ≤24k tokens: 3 repetitions
 
 ---
 
+# v3 (2026-10-19): safe chunk size for Gemma 4 12B
+
+**Question:** with `gemma-4-12b-fast` (Gemma 4 12B Q4_K_M, LM Studio, 32k context shared by 8 slots, reasoning off) on every role, how large can a chunk be before facts are missed?
+
+**Answer: about 4k Gemma tokens (≈5k by the chars÷4 estimate, ≈20k characters) per chunk for lossless extraction.** Up to ~8k the recall is ~98% (an occasional missed fact); from ~9k it drops to 60–85%. Qwen 3.5 9B (v1/v2) stayed perfect up to ~11k in one context and at ~16k per chunk, so the safe size is per model.
+
+Harness: [`chunk_size_sweep.py`](chunk_size_sweep.py) (same documents and scoring as v1/v2: 30 planted facts, exact match, list merge in code). 70 runs, one at a time: the full sweep with 2 documents per setting, then 4 more documents for each setting near the boundary. Raw data: [`results_v3_gemma.json`](results_v3_gemma.json), [`results_v3_gemma_confirm.json`](results_v3_gemma_confirm.json).
+
+Gemma's tokenizer counts ~25% fewer tokens than chars÷4 on this text (a "24k" document is ~18.5k Gemma tokens). The tables use LM Studio's real prompt-token count of the largest chunk.
+
+### Recall by chunk size (all runs, real tokens of the largest chunk)
+
+| Real tokens per chunk | Runs | Perfect | Mean recall | Worst |
+|---|---|---|---|---|
+| ~3k | 4 | 4/4 | 1.000 | 1.00 |
+| **~4k** | 8 | **8/8** | **1.000** | 1.00 |
+| ~5k | 6 | 4/6 | 0.978 | 0.93 |
+| ~6k | 12 | 8/12 | 0.981 | 0.87 |
+| ~7k | 6 | 3/6 | 0.939 | 0.80 |
+| ~8k | 6 | 3/6 | 0.983 | 0.97 |
+| ~9k | 8 | 1/8 | 0.817 | 0.67 |
+| ~11-12k | 4 | 0/4 | 0.72-0.85 | 0.60 |
+
+No run failed and none invented a fact; misses are omissions.
+
+### Speed against accuracy (60k-token document, list merge)
+
+| Chunks | Tokens/chunk (est · real) | Wall s | Recall (min) | Runs |
+|---|---|---|---|---|
+| 4 | 15k · 11.1k | 28.4 | 0.850 (0.83) | 2 |
+| 6 | 10k · 7.6k | **27.7** | 0.983 (0.97) | 6 |
+| 8 (current rule) | 7.5k · 5.9k | 29.7 | 0.989 (0.97) | 6 |
+| **12** | **5k · 4.1k** | 36.0 | **1.000 (1.00)** | 6 |
+| 16 | 3.8k · 3.3k | 38.5 | 1.000 (1.00) | 2 |
+
+24k document: 3 chunks 15.0 s · 0.972, 4 chunks 15.6 s · 0.978, 8 chunks 22.5 s · 1.000.
+
+### What this means
+
+1. **Safe chunk size for Gemma: ≤5k estimated tokens (≈4k real).** Lossless in every run, at ~20-25% more wall time than 7.5k chunks (more chunks share the GPU and repeat the instructions).
+2. **The current rule (`AutoChunks`: 4 chunks up to 30k, then 7.5k per chunk) gives Gemma ~98%:** usually right, occasionally one fact short. Fine for summaries, not for exhaustive extraction.
+3. **Never above ~8k real per chunk on Gemma** (≥9k loses 15-40% of facts). A single Gemma context is only safe for documents up to ~5k estimated tokens.
+4. **For large documents Qwen is much faster at full accuracy**: 65k tokens in 12.6 s with 4 chunks (v2) against 36 s with 12 chunks on Gemma. Worth weighing in the Gemma trial.
+5. Make the chunk size a per-model setting, measured with this sweep for each new model.
+
+---
+
 # v1 (first run, LLM merge only)
 
 ## Setup

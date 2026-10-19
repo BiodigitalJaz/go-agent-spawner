@@ -6,6 +6,13 @@ _Last updated: 2026-10-18_
 **Deployed and live** on the user's cluster: namespace `agent-spawner`, console at http://192.168.1.64:30880 (NodePort 30880 on any node). See deployment.md for every detail. Next steps depend on the user.
 
 ## Recent changes
+### 2026-10-19: safe chunk size for Gemma (experiment v3, branch `exp/chunk-size-gemma`)
+- `experiments/chunking/chunk_size_sweep.py` (explicit size:chunks pairs, new seeds via first_rep), 70 runs on gemma-4-12b-fast; results in RESULTS.md v3.
+- Gemma lossless only up to ~4k real tokens per chunk (≈5k chars/4, ≈20k chars): 12/12 perfect at ≤4k; ~98% at 5-8k; 60-85% at ≥9k. Gemma's tokenizer ≈ 0.77 × chars/4 on this prose. Current AutoChunks (7.5k est per chunk) gives Gemma ~98%. Qwen (v1/v2) was perfect to ~11k single and ~16k per chunk → safe chunk size must be per model.
+- Speed at full accuracy on a 60k doc: Gemma 12 chunks 36 s vs Qwen 4 chunks 12.6 s (v2) — large-document work favors Qwen.
+- Note: requests with chunks=1 larger than the model's budget are auto-split by fitToModel (the "single 20k/24k" rows really ran as 2-3 chunks).
+- Proposed (not done): per-model `chunk_tokens` on pool entries used by AutoChunks.
+
 ### 2026-10-19: Gemma trial — all roles on gemma-4-12b-fast (settings v12, branch `config/gemma-trial`)
 - Decision from two test-set benchmarks (judged by Qwen, then by Gemma): Gemma 4 12B (Q4_K_M) keeps 100% sourced figures (Qwen 83-89%), writes real Hyprland config where Qwen invents syntax, answers ~20% shorter; Qwen is ~20% faster per answer at 8 streams (27-29 vs 22-23 tok/s) and starts 2.5x sooner (TTFT 2.1 vs 5.4 s). Per-message judge wins flipped with the judge (each favors itself). Single-stream Gemma was faster (~50 vs ~35 tok/s), so Gemma suits chat; Qwen suits wide agent-pool runs.
 - Done: unloaded Qwen, loaded Gemma (32k, 8 parallel, LM Studio defaults) via /v1/discovery; planner/worker/reducer = gemma-4-12b-fast (v12; all roles to avoid swapping — both don't fit 16 GB). Config exported to deploy/config/andor.json.
