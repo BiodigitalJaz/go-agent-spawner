@@ -92,7 +92,7 @@ func (r *Registry) isStatic(name string) bool {
 
 // Load reads console-managed models and notifies listeners if the set changed.
 func (r *Registry) Load(ctx context.Context) error {
-	rows, err := r.db.Query(ctx, `SELECT name, model, endpoints, initial_limit, max_limit, extra, context_length, slots, shared_context, updated_at
+	rows, err := r.db.Query(ctx, `SELECT name, model, endpoints, initial_limit, max_limit, extra, context_length, slots, shared_context, chunk_tokens, updated_at
 		FROM agent_model ORDER BY name`)
 	if err != nil {
 		return err
@@ -104,7 +104,7 @@ func (r *Registry) Load(ctx context.Context) error {
 			eps, extra []byte
 			updated    time.Time
 		)
-		if err := rows.Scan(&m.Name, &m.Model, &eps, &m.InitialLimit, &m.MaxLimit, &extra, &m.ContextLength, &m.Slots, &m.SharedContext, &updated); err != nil {
+		if err := rows.Scan(&m.Name, &m.Model, &eps, &m.InitialLimit, &m.MaxLimit, &extra, &m.ContextLength, &m.Slots, &m.SharedContext, &m.ChunkTokens, &updated); err != nil {
 			rows.Close()
 			return err
 		}
@@ -202,8 +202,8 @@ func (r *Registry) Create(ctx context.Context, c backend.ModelConfig) error {
 		return err
 	}
 	eps, extra := marshal(c)
-	_, err := r.db.Exec(ctx, `INSERT INTO agent_model (name, model, endpoints, initial_limit, max_limit, extra, context_length, slots, shared_context)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, c.Name, c.Model, eps, c.InitialLimit, c.MaxLimit, extra, c.ContextLength, c.Slots, c.SharedContext)
+	_, err := r.db.Exec(ctx, `INSERT INTO agent_model (name, model, endpoints, initial_limit, max_limit, extra, context_length, slots, shared_context, chunk_tokens)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`, c.Name, c.Model, eps, c.InitialLimit, c.MaxLimit, extra, c.ContextLength, c.Slots, c.SharedContext, c.ChunkTokens)
 	if err != nil && strings.Contains(err.Error(), "duplicate key") {
 		return ErrExists
 	}
@@ -223,8 +223,8 @@ func (r *Registry) Update(ctx context.Context, c backend.ModelConfig) error {
 	}
 	eps, extra := marshal(c)
 	tag, err := r.db.Exec(ctx, `UPDATE agent_model SET model = $2, endpoints = $3, initial_limit = $4,
-		max_limit = $5, extra = $6, context_length = $7, slots = $8, shared_context = $9, updated_at = now() WHERE name = $1`,
-		c.Name, c.Model, eps, c.InitialLimit, c.MaxLimit, extra, c.ContextLength, c.Slots, c.SharedContext)
+		max_limit = $5, extra = $6, context_length = $7, slots = $8, shared_context = $9, chunk_tokens = $10, updated_at = now() WHERE name = $1`,
+		c.Name, c.Model, eps, c.InitialLimit, c.MaxLimit, extra, c.ContextLength, c.Slots, c.SharedContext, c.ChunkTokens)
 	if err != nil {
 		return err
 	}

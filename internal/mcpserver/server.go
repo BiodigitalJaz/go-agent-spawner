@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/BiodigitalJaz/go-agent-spawner/internal/agent"
 	"os"
 	"strings"
 	"time"
@@ -55,7 +54,7 @@ func New(api *Client, opts Options) *mcp.Server {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "run_task",
 		Title:       "Run a task on the agent pool",
-		Description: "Run a prompt on the local agent pool and return the merged result. Agents cannot browse: give them what they need. Shared reference material that every agent should see (a page under review, rules to respect) goes in `context`; a long input to split goes in `document` (chunked automatically: one context up to about 6k tokens, otherwise 4+ chunks); separate items go in `parts` (one agent per part). Web links in the prompt are fetched into the context unless fetch_urls is false. Waits for the result by default, reporting progress.",
+		Description: "Run a prompt on the local agent pool and return the merged result. Agents cannot browse: give them what they need. Shared reference material that every agent should see (a page under review, rules to respect) goes in `context`; a long input to split goes in `document` (chunked automatically: one context up to about 6k tokens, otherwise 4+ chunks, never larger than the worker model's safe chunk size); separate items go in `parts` (one agent per part). Web links in the prompt are fetched into the context unless fetch_urls is false. Waits for the result by default, reporting progress.",
 		Annotations: &mcp.ToolAnnotations{Title: "Run task", OpenWorldHint: boolPtr(false)},
 	}, s.runTask)
 
@@ -108,7 +107,7 @@ type RunInput struct {
 	Prompt         string `json:"prompt" jsonschema:"the task, or the instruction applied to the document or each part"`
 	Document       string `json:"document,omitempty" jsonschema:"a long input to split into chunks handled in parallel"`
 	Parts          []Part `json:"parts,omitempty" jsonschema:"inputs given one agent each, such as files; titles name them in the result"`
-	Chunks         int    `json:"chunks,omitempty" jsonschema:"number of chunks for document; 0 picks automatically (1 up to about 6k tokens, else 4 or more)"`
+	Chunks         int    `json:"chunks,omitempty" jsonschema:"number of chunks for document; 0 lets the server pick (1 up to about 6k tokens, else 4 or more, within the worker model's safe chunk size)"`
 	Context        string `json:"context,omitempty" jsonschema:"reference material every agent receives (planner, workers and merge): a page you fetched, rules the answer must respect. Up to about 24,000 characters"`
 	Search         bool   `json:"search,omitempty" jsonschema:"run a web search (the server's SearXNG) before planning and give every agent the results with their addresses. Use when the task needs current or external information that is not in the prompt or context"`
 	Check          *bool  `json:"check,omitempty" jsonschema:"when context is given, check the final answer against it and remove or fix conflicting recommendations (default: the server setting, normally on)"`
@@ -159,21 +158,17 @@ type RunOutput struct {
 	ConsoleURL  string       `json:"console_url,omitempty"`
 }
 
-// AutoChunks is the server's rule for document chunks (agent.AutoChunks).
-func AutoChunks(doc string) int { return agent.AutoChunks(doc) }
-
 func (s *server) runTask(ctx context.Context, req *mcp.CallToolRequest, in RunInput) (*mcp.CallToolResult, RunOutput, error) {
 	if strings.TrimSpace(in.Prompt) == "" {
 		return nil, RunOutput{}, errors.New("prompt is required")
 	}
 	body := CreateTree{Prompt: in.Prompt, Priority: in.Priority, Model: in.Model, MaxDepth: in.MaxDepth, Merge: in.Merge, Parts: in.Parts, MaxPartTokens: in.MaxPartTokens, PartMaxWords: in.PartMaxWords,
 		Context: in.Context, FetchURLs: in.FetchURLs == nil || *in.FetchURLs, Check: in.Check, Search: in.Search}
+	// Chunks 0 lets the server choose: it knows the worker model's safe
+	// chunk size.
 	chunks := 0
 	if len(in.Parts) == 0 && in.Document != "" {
-		chunks = in.Chunks
-		if chunks <= 0 {
-			chunks = AutoChunks(in.Document)
-		}
+		chunks = max(in.Chunks, 0)
 		body.Document, body.Chunks = in.Document, chunks
 	}
 	return s.start(ctx, req, body, chunks, nil, in.Wait, in.TimeoutSeconds)
@@ -205,9 +200,12 @@ func (s *server) analyzeFiles(ctx context.Context, req *mcp.CallToolRequest, in 
 func (s *server) start(ctx context.Context, req *mcp.CallToolRequest, body CreateTree, chunks int, skipped []string, wait *bool, timeoutSec int) (*mcp.CallToolResult, RunOutput, error) {
 	auth := s.auth(req)
 	began := time.Now()
-	id, err := s.api.CreateTree(ctx, auth, body)
+	id, serverChunks, err := s.api.CreateTree(ctx, auth, body)
 	if err != nil {
 		return nil, RunOutput{}, err
+	}
+	if serverChunks > 0 {
+		chunks = serverChunks
 	}
 	out := RunOutput{TaskID: id, Status: "running", Chunks: chunks, Skipped: skipped, ConsoleURL: s.consoleLink(id)}
 	if wait != nil && !*wait {

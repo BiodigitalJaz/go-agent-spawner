@@ -201,7 +201,11 @@ func (s *Server) startRun(ctx context.Context, req createRequest, history []sett
 	if err != nil {
 		return nil, uuid.Nil, err
 	}
-	sizing, err := fitToModel(&req, ctxLen, set.Worker.MaxTokens, reference)
+	chunkTokens := 0
+	if m, ok := s.registry.Get(set.Worker.Model); ok {
+		chunkTokens = m.ChunkTokens
+	}
+	sizing, err := fitToModel(&req, ctxLen, set.Worker.MaxTokens, chunkTokens, reference)
 	if err != nil {
 		return nil, uuid.Nil, badRequest("%s", err.Error())
 	}
@@ -252,6 +256,9 @@ func (s *Server) startRun(ctx context.Context, req createRequest, history []sett
 	}
 	if sizing != "" {
 		resp["sizing"] = sizing
+	}
+	if req.Document != "" && len(req.Parts) == 0 {
+		resp["chunks"] = max(req.Chunks, 1)
 	}
 	if len(fetched) > 0 {
 		resp["fetched"] = fetched
@@ -431,6 +438,7 @@ type modelView struct {
 	Context   int            `json:"context_length,omitempty"`
 	Slots     int            `json:"slots,omitempty"`
 	Shared    bool           `json:"shared_context,omitempty"`
+	Chunk     int            `json:"chunk_tokens,omitempty"`
 	Source    string         `json:"source"` // config (backends.json) or ui
 }
 
@@ -441,7 +449,7 @@ func (s *Server) getModels(w http.ResponseWriter, _ *http.Request) {
 	out := make([]modelView, len(list))
 	for i, m := range list {
 		out[i] = modelView{Name: m.Name, Model: m.Model, Endpoints: m.Endpoints, Initial: m.InitialLimit, Max: m.MaxLimit, Extra: m.Extra,
-			Context: m.ContextLength, Slots: m.Slots, Shared: m.SharedContext, Source: m.Source}
+			Context: m.ContextLength, Slots: m.Slots, Shared: m.SharedContext, Chunk: m.ChunkTokens, Source: m.Source}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"models": out, "workers": s.workers.list()})
 }
@@ -456,11 +464,12 @@ type modelRequest struct {
 	Context      int            `json:"context_length"`
 	Slots        int            `json:"slots"`
 	Shared       bool           `json:"shared_context"`
+	ChunkTokens  int            `json:"chunk_tokens"`
 }
 
 func (r modelRequest) config() backend.ModelConfig {
 	return backend.ModelConfig{Name: strings.TrimSpace(r.Name), Model: strings.TrimSpace(r.Model), Endpoints: r.Endpoints,
-		InitialLimit: r.InitialLimit, MaxLimit: r.MaxLimit, Extra: r.Extra, ContextLength: r.Context, Slots: r.Slots, SharedContext: r.Shared}
+		InitialLimit: r.InitialLimit, MaxLimit: r.MaxLimit, Extra: r.Extra, ContextLength: r.Context, Slots: r.Slots, SharedContext: r.Shared, ChunkTokens: r.ChunkTokens}
 }
 
 func (s *Server) modelChanged(action, name string) {

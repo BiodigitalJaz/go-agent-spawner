@@ -1474,6 +1474,7 @@ function modelsView(root) {
         h("dt", {}, "Limit bounds"), h("dd", {}, `start ${m.initial_limit || 1}, max ${m.max_limit || 64} per worker`),
         h("dt", {}, "Server slots"), h("dd", {}, m.slots ? `${m.slots} shared by all workers` : "no shared cap"),
         h("dt", {}, "Context"), h("dd", {}, m.context_length ? `${m.context_length.toLocaleString()} tokens${m.shared_context ? " shared by all slots" : " per request"}` : "unknown (merges assume 8k)"),
+        h("dt", { title: "Largest document chunk this model reads without missing facts; automatic chunking stays under it" }, "Safe chunk"), h("dd", {}, m.chunk_tokens ? `${m.chunk_tokens.toLocaleString()} tokens` : "default rule (~7.5k)"),
         reasoning && h("dt", {}, "Reasoning"), reasoning && h("dd", {}, reasoning === "none" ? "off" : reasoning),
         m.extra && h("dt", {}, "Extra params"), m.extra && h("dd", { class: "mono" }, JSON.stringify(m.extra))),
       formSlot,
@@ -1506,7 +1507,7 @@ function modelsView(root) {
     if (editors.has(m.name)) { editors.get(m.name).remove(); editors.delete(m.name); return; }
     const form = modelForm({
       mode: "edit", name: m.name, model: m.model, endpoints: m.endpoints, initial: m.initial_limit, max: m.max_limit, extra: m.extra,
-      context: m.context_length, slots: m.slots, shared: m.shared_context,
+      context: m.context_length, slots: m.slots, shared: m.shared_context, chunk: m.chunk_tokens,
       reasoningOptions: discoveredReasoning(m.model),
       onCancel: () => toggleEdit(m, slot),
       onSubmit: async (body) => {
@@ -2057,7 +2058,7 @@ function benchSection(getDisc) {
 
 // Shared add/edit form for a pool model. Reasoning maps to LM Studio's
 // reasoning_effort ("off" is sent as "none"; "on" is the model default).
-function modelForm({ mode, name, model, endpoints, initial, max, context, slots, shared, extra, reasoningOptions, onSubmit, onCancel }) {
+function modelForm({ mode, name, model, endpoints, initial, max, context, slots, shared, chunk, extra, reasoningOptions, onSubmit, onCancel }) {
   const extraObj = { ...(extra || {}) };
   const nameIn = h("input", { type: "text", value: name, disabled: mode === "edit", "aria-label": "Routing name" });
   const modelIn = h("input", { type: "text", value: model, class: "mono", "aria-label": "API model id" });
@@ -2067,6 +2068,7 @@ function modelForm({ mode, name, model, endpoints, initial, max, context, slots,
   const ctxIn = h("input", { type: "number", min: 0, step: 1024, value: context || 0, "aria-label": "Context length" });
   const slotsIn = h("input", { type: "number", min: 0, max: 256, value: slots || 0, "aria-label": "Server slots" });
   const sharedIn = h("input", { type: "checkbox", checked: !!shared, "aria-label": "Context shared by all slots" });
+  const chunkIn = h("input", { type: "number", min: 0, step: 500, value: chunk || 0, "aria-label": "Safe chunk size" });
   const current = extraObj.reasoning_effort === "none" ? "off" : extraObj.reasoning_effort || "";
   const opts = [...new Set([...(reasoningOptions || []), ...(current ? [current] : [])])].filter((o) => o !== "on");
   const reasonSel = h("select", { "aria-label": "Reasoning" },
@@ -2088,6 +2090,7 @@ function modelForm({ mode, name, model, endpoints, initial, max, context, slots,
       endpoints: epsIn.value.split(/[\s,]+/).filter(Boolean),
       initial_limit: Number(initIn.value) || 0, max_limit: Number(maxIn.value) || 0,
       context_length: Number(ctxIn.value) || 0, slots: Number(slotsIn.value) || 0, shared_context: sharedIn.checked,
+      chunk_tokens: Number(chunkIn.value) || 0,
       extra: Object.keys(extraBody).length ? extraBody : null,
     };
     save.disabled = true;
@@ -2111,6 +2114,9 @@ function modelForm({ mode, name, model, endpoints, initial, max, context, slots,
       h("label", { class: "field", title: "Server parallel slots shared by all workers; 0 = no shared cap." }, "Server slots (all workers)", slotsIn),
       h("label", { class: "field", title: "LM Studio and llama.cpp share one context (KV cache) across all parallel requests. When set, requests are admitted only while their estimated tokens fit, across all workers." },
         "Context shared by all slots", h("span", { style: "display:flex;gap:6px;align-items:center;color:var(--text);font-weight:400" }, sharedIn, "budget requests by tokens"))),
+    h("div", { class: "grid3" },
+      h("label", { class: "field", title: "The largest document chunk (estimated tokens, characters ÷ 4) this model reads without missing facts. Automatic chunking never makes chunks larger. Measure it with experiments/chunking/chunk_size_sweep.py; 0 = the default rule (about 7.5k per chunk)." },
+        "Safe chunk size (tokens, 0 = default)", chunkIn)),
     h("div", { class: "note" }, "Max limit is per worker; server slots and the shared context cap totals across all workers."),
     h("label", { class: "field" }, "Extra request params (JSON, optional)", extraIn),
     err,

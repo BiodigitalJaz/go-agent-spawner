@@ -1,5 +1,5 @@
 {
-  "exported_at": "2026-10-19T16:01:22Z",
+  "exported_at": "2026-10-19T20:16:16Z",
   "from": "http://192.168.1.64:30880",
   "settings_version": 12,
   "settings": {
@@ -25,6 +25,7 @@
   },
   "models": [
     {
+      "chunk_tokens": 5000,
       "context_length": 32000,
       "endpoints": [
         "http://192.168.1.76:1234"
@@ -40,6 +41,7 @@
       "slots": 8
     },
     {
+      "chunk_tokens": 16000,
       "context_length": 32000,
       "endpoints": [
         "http://192.168.1.76:1234"

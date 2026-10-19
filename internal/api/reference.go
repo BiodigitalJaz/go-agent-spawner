@@ -156,7 +156,7 @@ func (s *Server) reference(ctx context.Context, req *createRequest, set settings
 // more chunks and large parts more sections when the reference is large. It
 // returns a note when it changed the split, and an error when the reference
 // leaves no room at all.
-func fitToModel(req *createRequest, contextTokens, reserveOutput int, reference string) (string, error) {
+func fitToModel(req *createRequest, contextTokens, reserveOutput, chunkTokens int, reference string) (string, error) {
 	budget := agent.PartBudget(contextTokens, reserveOutput, len(reference), len(req.Prompt))
 	if budget < agent.MinPartBudget {
 		return "", fmt.Errorf("the reference material (%d characters) and prompt leave no room in the worker model's context for the agents' own input; shorten the reference or use a model with a larger context", len(reference))
@@ -174,16 +174,19 @@ func fitToModel(req *createRequest, contextTokens, reserveOutput int, reference 
 	case req.Document != "":
 		var note string
 		if req.Chunks == 0 {
-			req.Chunks = agent.AutoChunks(req.Document)
-			if req.Chunks == 1 {
+			req.Chunks = agent.AutoChunks(req.Document, chunkTokens)
+			switch {
+			case req.Chunks == 1:
 				note = fmt.Sprintf("document read whole by one agent (about %d tokens; splitting only pays above about 6k)", len(req.Document)/4)
-			} else {
+			case chunkTokens > 0 && req.Chunks > agent.AutoChunks(req.Document, 0):
+				note = fmt.Sprintf("document split into %d chunks automatically (about %d tokens; the worker model's safe chunk size is %d tokens)", req.Chunks, len(req.Document)/4, chunkTokens)
+			default:
 				note = fmt.Sprintf("document split into %d chunks automatically (about %d tokens)", req.Chunks, len(req.Document)/4)
 			}
 		}
 		need := (len(req.Document)/3 + budget - 1) / budget
-		if need > 64 {
-			return "", fmt.Errorf("the document needs %d chunks to fit the model's context alongside the reference; the limit is 64", need)
+		if need > agent.MaxChunks {
+			return "", fmt.Errorf("the document needs %d chunks to fit the model's context alongside the reference; the limit is %d", need, agent.MaxChunks)
 		}
 		if need > max(req.Chunks, 1) {
 			req.Chunks = need

@@ -42,14 +42,27 @@ const MinPartBudget = minPartBudget
 // merge that rewrites the answer, roughly doubling the text generated);
 // above that 4 chunks were fastest and fully accurate up to 65k tokens on
 // an 8-slot server, and larger documents get one chunk per ~7.5k tokens.
-func AutoChunks(doc string) int {
+//
+// chunkTokens is the worker model's safe chunk size (0: none known): chunks
+// are never larger, since models differ a lot here (Gemma 4 12B misses
+// facts above ~5k estimated tokens per chunk, Qwen 3.5 9B held to ~16k;
+// experiments/chunking/RESULTS.md v3).
+func AutoChunks(doc string, chunkTokens int) int {
 	t := len(doc) / 4
+	var n int
 	switch {
 	case t <= 6000:
-		return 1
+		n = 1
 	case t <= 30000:
-		return 4
+		n = 4
 	default:
-		return min(16, (t+7499)/7500)
+		n = min(16, (t+7499)/7500)
 	}
+	if chunkTokens > 0 {
+		n = max(n, min(MaxChunks, (t+chunkTokens-1)/chunkTokens))
+	}
+	return n
 }
+
+// MaxChunks is the most chunks a document is split into.
+const MaxChunks = 64
