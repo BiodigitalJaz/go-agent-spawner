@@ -357,7 +357,7 @@ function buildComposer() {
     if (!current || send.disabled) return;
     send.disabled = true;
     try {
-      const res = await api("POST", `/v1/chats/${current}/retry`, { search_mode: "on", deep: deepBox.checked });
+      const res = await api("POST", `/v1/chats/${current}/retry`, { search_mode: "on", deep: deepBox.checked, source_check: checkBox.checked });
       b.el.classList.remove("error");
       b.text = "";
       b.body.replaceChildren();
@@ -1074,6 +1074,10 @@ function chatView(root, initialId) {
     h("span", { class: "mode-label" }, "Search"), ...modeBtns);
   const deepBox = h("input", { type: "checkbox", "aria-label": "Agent pool", checked: pref("deep", "0") === "1",
     onchange: (e) => savePref("deep", e.target.checked ? "1" : "0") });
+  const checkBox = h("input", { type: "checkbox", "aria-label": "Check sources", checked: pref("check", "0") === "1",
+    onchange: (e) => savePref("check", e.target.checked ? "1" : "0") });
+  const checkLabel = h("label", { class: "check", hidden: !app.searchEnabled,
+    title: "After a reply written from web search, compare it with the pages: unsupported fees, dates and rules are removed or marked unverified. The answer is replaced when the check finishes." }, checkBox, " Check sources");
   const send = h("button", { class: "btn primary", onclick: () => submit() }, "Send");
   const stop = h("button", { class: "btn danger", hidden: true, onclick: () => stopReply() }, "Stop");
   const title = h("h2", { class: "chat-title" });
@@ -1084,6 +1088,7 @@ function chatView(root, initialId) {
     h("div", { class: "chat-opts" },
       searchCtl,
       h("label", { class: "check", title: "Split the reply across parallel agents: slower, for big requests (long reports, many parts)" }, deepBox, " Agent pool"),
+      checkLabel,
       h("span", { class: "grow" }), stop, send)));
 
   function bubble(role) {
@@ -1214,7 +1219,7 @@ function chatView(root, initialId) {
         history.replaceState(null, "", `#/chat/${id}`); // no re-render: stay in this thread
         del.hidden = false;
       }
-      const res = await api("POST", `/v1/chats/${id}/messages`, { content, search_mode: app.searchEnabled ? searchMode : "off", deep: deepBox.checked });
+      const res = await api("POST", `/v1/chats/${id}/messages`, { content, search_mode: app.searchEnabled ? searchMode : "off", deep: deepBox.checked, source_check: checkBox.checked });
       input.value = "";
       for (const r of thread.querySelectorAll(".retry")) r.remove(); // only the last reply can be written again
       const ub = bubble("user");
@@ -1248,7 +1253,7 @@ function chatView(root, initialId) {
   return {
     name: "chat",
     select: (id) => { if (id !== current) open(id); },
-    onModels: () => { searchCtl.hidden = !app.searchEnabled; },
+    onModels: () => { searchCtl.hidden = checkLabel.hidden = !app.searchEnabled; },
     destroy() { destroyed = true; closeStream(); },
   };
 }
@@ -1412,6 +1417,7 @@ function modelsView(root) {
   const hostInput = h("input", { type: "text", placeholder: "http://host:1234", "aria-label": "Backend host URL" });
   const refreshBtn = h("button", { class: "btn", onclick: () => discover() }, "Refresh");
   const editors = new Map(); // pool model name -> open edit form element
+  const bench = benchSection(() => disc);
 
   root.append(h("div", { class: "page" },
     h("div", { class: "page-head" },
@@ -1426,7 +1432,8 @@ function modelsView(root) {
       h("button", { class: "btn", onclick: addHost }, "Add host"),
       h("span", { class: "grow" }),
       refreshBtn),
-    discBody));
+    discBody,
+    bench.el));
 
   // ---- pool cards: rebuilt only when the model set changes; gauges in place ----
   let poolKey = "";
@@ -1578,6 +1585,7 @@ function modelsView(root) {
     if (!disc) { discBody.replaceChildren(h("div", { class: "empty" }, "Discovering…")); return; }
     if (!disc.hosts.length) { discBody.replaceChildren(h("div", { class: "empty" }, "No backend hosts yet. Add one above.")); return; }
     discBody.replaceChildren(...disc.hosts.map(hostPanel));
+    bench.renderPublished();
   }
 
   function hostPanel(host) {
@@ -1706,7 +1714,225 @@ function modelsView(root) {
   renderPool();
   renderDiscovery();
   discover();
-  return { onModels: renderPool, destroy() { clearInterval(poll); } };
+  return { onModels: () => { renderPool(); bench.onModels(); }, destroy() { clearInterval(poll); bench.destroy(); } };
+}
+
+// benchSection is the Benchmarking part of the Models page: published
+// scores for candidate models (with what the backends have installed), and
+// replays of a chat against pool models, scored by a judge model.
+function benchSection(getDisc) {
+  const pubBody = h("div", { class: "bench-pub" });
+  const form = h("div", { class: "panel bench-form" });
+  const listEl = h("div", { class: "bench-list" });
+  const detailEl = h("div", { class: "bench-detail" });
+  const el = h("div", {},
+    h("h3", { class: "section-title", style: "margin-top:28px" }, "Benchmarking", h("span", { class: "hint" }, "published scores, and replays of your own chats")),
+    pubBody,
+    h("h3", { class: "section-title", style: "margin-top:20px" }, "Replay a chat", h("span", { class: "hint" }, "every model answers the same messages from the same sources; a judge model scores them")),
+    form, listEl, detailEl);
+
+  // ---- published scores ----
+  let pub = null;
+  fetch("benchmarks.json", { cache: "no-cache" }).then((r) => r.json()).then((d) => { pub = d; renderPublished(); }).catch(() => {});
+  function installed(m) {
+    const out = [];
+    for (const host of getDisc()?.hosts || []) for (const x of host.models) {
+      if (m.match.some((k) => x.id.toLowerCase().includes(k))) out.push(`${x.loaded ? "loaded" : "on disk"}${x.quant ? ` (${x.quant})` : ""}`);
+    }
+    return out;
+  }
+  function renderPublished() {
+    if (!pub) { pubBody.replaceChildren(h("div", { class: "empty" }, "Loading published scores…")); return; }
+    const head = h("tr", {}, h("th", {}, "Model"), h("th", {}, "Size"), h("th", {}, "Fits a 16 GB GPU as"),
+      ...pub.benchmarks.map((b) => h("th", { title: b.about, class: "num" }, b.name)), h("th", {}, "On your hosts"), h("th", {}, "Get"));
+    const rows = pub.models.map((m) => {
+      const have = installed(m);
+      return h("tr", {},
+        h("td", {}, h("b", {}, m.name), h("div", { class: "faint" }, m.note)),
+        h("td", {}, m.params, h("div", { class: "faint" }, `${m.context} ctx · ${m.license}`)),
+        h("td", {}, m.fits),
+        ...pub.benchmarks.map((b) => h("td", { class: "num" }, m.scores[b.key] != null ? String(m.scores[b.key]) : "–")),
+        h("td", {}, have.length ? have.join(", ") : h("span", { class: "faint" }, "not installed")),
+        h("td", {}, m.lmstudio && h("a", { href: m.lmstudio, target: "_blank", rel: "noopener" }, "LM Studio"), m.lmstudio && m.gguf && " · ",
+          m.gguf && h("a", { href: m.gguf, target: "_blank", rel: "noopener" }, "GGUF"),
+          h("div", {}, ...m.sources.map((u, i) => h("a", { href: u, target: "_blank", rel: "noopener", class: "faint", style: "margin-right:6px" }, `source ${i + 1}`)))));
+    });
+    pubBody.replaceChildren(h("details", { class: "panel bench-pub-panel" },
+      h("summary", {}, `Published scores (${pub.models.length} models, collected ${pub.retrieved})`),
+      h("p", { class: "note" }, `${pub.source_note} ${pub.gpu_note}`),
+      h("div", { class: "table-scroll" }, h("table", { class: "bench-table" }, h("thead", {}, head), h("tbody", {}, ...rows)))));
+  }
+
+  // ---- replay form ----
+  const srcSel = h("select", { "aria-label": "Chat to replay", onchange: () => { msg.hidden = srcSel.value !== "new"; } });
+  const msg = h("textarea", { rows: 3, placeholder: "A new message to benchmark with (it is sent as a chat first, with search on Auto, to collect its sources)", "aria-label": "New message" });
+  const modelsBox = h("div", { class: "bench-models" });
+  const judgeSel = h("select", { "aria-label": "Judge model" });
+  const parSel = h("select", { "aria-label": "Parallel streams" }, ...[1, 2, 4, 8].map((n) => h("option", { value: n }, `${n}`)));
+  parSel.value = "4";
+  const swapBox = h("input", { type: "checkbox", checked: true, "aria-label": "Swap models on the GPU" });
+  const startBtn = h("button", { class: "btn primary", onclick: () => start() }, "Start benchmark");
+  form.append(
+    h("div", { class: "bench-grid" },
+      h("label", { class: "field" }, "Chat", srcSel),
+      h("label", { class: "field" }, "Judge model", judgeSel),
+      h("label", { class: "field", title: "Answers run at the same time per model; cases repeat to fill the streams. Speed numbers are measured at this load." }, "Parallel streams", parSel)),
+    msg,
+    h("div", { class: "field-label" }, "Models to compare (up to 4)"),
+    modelsBox,
+    h("label", { class: "check", title: "On LM Studio hosts, load each model before its turn (unloading the others), then the judge, then put back what was loaded. Chat and runs on these hosts slow down or wait meanwhile." },
+      swapBox, " Swap models on the GPU automatically (other work on these hosts waits while models load)"),
+    h("div", { class: "form-actions" }, startBtn));
+
+  let chats = [];
+  async function loadChats() {
+    try { chats = (await api("GET", "/v1/chats")).chats; } catch { chats = []; }
+    const keep = srcSel.value;
+    srcSel.replaceChildren(h("option", { value: "new" }, "New message…"), ...chats.map((c) => h("option", { value: c.id }, c.title || "Untitled chat")));
+    srcSel.value = [...srcSel.options].some((o) => o.value === keep) ? keep : (chats[0]?.id || "new");
+    msg.hidden = srcSel.value !== "new";
+  }
+  function onModels() {
+    const s = app.settings?.settings;
+    const names = app.models.map((m) => m.name);
+    const key = names.join(",");
+    if (modelsBox.dataset.key === key) return;
+    modelsBox.dataset.key = key;
+    const checked = new Set([...modelsBox.querySelectorAll("input:checked")].map((i) => i.value));
+    if (!checked.size && s) checked.add(s.worker.model);
+    modelsBox.replaceChildren(...app.models.map((m) => h("label", { class: "check" },
+      h("input", { type: "checkbox", value: m.name, checked: checked.has(m.name) }), ` ${m.name}`, h("span", { class: "faint mono" }, ` ${m.model}`))));
+    const j = judgeSel.value || s?.reducer.model;
+    judgeSel.replaceChildren(...names.map((n) => h("option", { value: n }, n)));
+    if (j && names.includes(j)) judgeSel.value = j;
+  }
+
+  async function start() {
+    const models = [...modelsBox.querySelectorAll("input:checked")].map((i) => i.value);
+    if (!models.length) { toast("Choose at least one model", true); return; }
+    if (models.length > 4) { toast("Choose up to 4 models", true); return; }
+    const body = { models, judge: judgeSel.value, parallel: Number(parSel.value), swap: swapBox.checked };
+    if (srcSel.value === "new") {
+      body.message = msg.value.trim();
+      if (!body.message) { toast("Write a message, or choose a chat", true); return; }
+    } else body.chat_id = srcSel.value;
+    startBtn.disabled = true;
+    try {
+      const r = await api("POST", "/v1/benchmarks", body);
+      toast("Benchmark started");
+      msg.value = "";
+      selected = r.id;
+      await loadList();
+      loadChats();
+    } catch (e) { toast(e.message, true); }
+    finally { startBtn.disabled = false; }
+  }
+
+  // ---- results ----
+  let list = [];
+  let selected = null;
+  let detail = null;
+  const ACTIVE = new Set(["running", "cancelling"]);
+  const pillClass = { running: "s-running", cancelling: "s-waiting", done: "s-done", failed: "s-failed", cancelled: "s-cancelled", interrupted: "s-failed" };
+
+  async function loadList() {
+    try { list = (await api("GET", "/v1/benchmarks")).benchmarks; } catch { list = []; }
+    if (!selected && list.length) selected = list[0].id;
+    renderList();
+    if (selected) await loadDetail();
+  }
+  function renderList() {
+    if (!list.length) { listEl.replaceChildren(); return; }
+    listEl.replaceChildren(h("div", { class: "bench-runs" }, ...list.map((b) => {
+      const cfg = b.config || {};
+      return h("button", { class: `bench-run${b.id === selected ? " selected" : ""}`, onclick: () => { selected = b.id; renderList(); loadDetail(); } },
+        h("span", { class: `pill ${pillClass[b.status] || ""}${ACTIVE.has(b.status) ? " live" : ""}` }, b.status),
+        h("span", {}, (cfg.models || []).join(" vs ")),
+        h("span", { class: "faint" }, fmtAgo(new Date(b.created_at).getTime())));
+    })));
+  }
+  async function loadDetail() {
+    try { detail = await api("GET", `/v1/benchmarks/${selected}`); } catch (e) { detail = null; detailEl.replaceChildren(h("div", { class: "banner error" }, e.message)); return; }
+    renderDetail();
+  }
+  const ms = (v) => (v ? fmtDur(v) : "–");
+  const num = (v, d = 1) => (v ? v.toFixed(d) : "–");
+  function renderDetail() {
+    const b = detail;
+    if (!b) { detailEl.replaceChildren(); return; }
+    const r = b.results || {};
+    const active = ACTIVE.has(b.status);
+    const head = h("div", { class: "bench-head" },
+      h("span", { class: `pill ${pillClass[b.status] || ""}${active ? " live" : ""}` }, b.status),
+      h("span", {}, active ? r.phase || "" : `judged by ${r.judge}`),
+      r.chat_id && h("a", { href: `#/chat/${r.chat_id}` }, "Open the chat"),
+      h("span", { class: "grow" }),
+      h("button", { class: "btn small danger", onclick: () => removeBench(b, active) }, active ? "Cancel" : "Delete"));
+    const models = r.models || [];
+    const sumHead = h("tr", {}, h("th", {}, "Model"), h("th", {}, "Status"),
+      h("th", { class: "num", title: "Answers that finished with text" }, "Answered"),
+      h("th", { class: "num", title: "Answers that declined or withheld the help asked for" }, "Refusals"),
+      h("th", { class: "num", title: "Fees, dates, limits or legal claims not in the sources (or stated as certain without sources)" }, "Invented specifics"),
+      h("th", { class: "num", title: "Clearly wrong general knowledge" }, "Knowledge slips"),
+      h("th", { class: "num", title: "Median tokens per second of one answer" }, "tok/s"),
+      h("th", { class: "num", title: "All tokens of the concurrent batch divided by its wall time" }, "Total tok/s"),
+      h("th", { class: "num", title: "Median time to first token" }, "TTFT"),
+      h("th", { class: "num", title: "Wall time of the concurrent batch" }, "Batch time"));
+    const lowest = (key) => { const v = models.filter((m) => m.judged).map((m) => m[key]); return v.length > 1 ? Math.min(...v) : null; };
+    const best = { refusals: lowest("refusals"), unsupported: lowest("unsupported"), slips: lowest("slips") };
+    const cell = (m, key) => h("td", { class: `num${best[key] != null && m[key] === best[key] ? " best" : ""}` }, m.judged ? String(m[key]) : "–");
+    const sumRows = models.map((m) => h("tr", {},
+      h("td", {}, h("b", {}, m.name), h("div", { class: "faint mono" }, m.model)),
+      h("td", {}, m.status, m.error && h("div", { class: "faint" }, m.error)),
+      h("td", { class: "num" }, `${m.answered || 0}/${(r.cases || []).length}`),
+      cell(m, "refusals"), cell(m, "unsupported"), cell(m, "slips"),
+      h("td", { class: "num" }, num(m.median_tps)),
+      h("td", { class: "num" }, m.aggregate_tps ? `${num(m.aggregate_tps)} @${m.parallel}` : "–"),
+      h("td", { class: "num" }, ms(m.median_ttft_ms)),
+      h("td", { class: "num" }, ms(m.wall_ms))));
+    const cases = (r.cases || []).map((c, ci) => h("section", { class: "panel bench-case" },
+      h("div", { class: "bench-q" }, h("span", { class: "faint" }, `Message ${ci + 1}${c.sources ? " · with sources" : " · no sources"}`), h("div", {}, c.prompt.length > 300 ? c.prompt.slice(0, 300) + "…" : c.prompt)),
+      ...models.map((m) => {
+        const a = (m.answers || []).find((x) => x.case === ci);
+        if (!a) return h("div", { class: "faint bench-a" }, `${m.name}: waiting…`);
+        const tags = [];
+        if (a.refused != null) tags.push(a.refused ? "refused" : "helped");
+        if (a.unsupported) tags.push(`${a.unsupported.length} invented`);
+        if (a.slips) tags.push(`${a.slips.length} slips`);
+        if (a.judge_error) tags.push(a.judge_error);
+        if (a.tokens_per_second) tags.push(`${a.tokens_per_second.toFixed(1)} tok/s`);
+        return h("details", { class: "bench-a" },
+          h("summary", {}, h("b", {}, m.name), " ", h("span", { class: `faint${a.refused ? " bad" : ""}` }, a.status !== "done" ? `${a.status}${a.error ? ": " + a.error : ""}` : tags.join(" · "))),
+          a.refused && h("div", { class: "finding bad" }, "Judged a refusal"),
+          ...(a.unsupported || []).map((x) => h("div", { class: "finding" }, "Invented: ", x)),
+          ...(a.slips || []).map((x) => h("div", { class: "finding" }, "Slip: ", x)),
+          a.output && h("div", { class: "out md bench-out" }, renderMarkdown(a.output)),
+          h("div", { class: "bench-links" },
+            a.tree_id && h("a", { href: `#/runs/${a.tree_id}`, class: "faint" }, "View run"),
+            a.judge_tree && a.judge_tree !== "00000000-0000-0000-0000-000000000000" && h("a", { href: `#/runs/${a.judge_tree}`, class: "faint" }, "View judge run")));
+      })));
+    detailEl.replaceChildren(h("section", { class: "panel bench-summary" }, head,
+      b.error && h("div", { class: "banner error" }, b.error),
+      ...(r.notes || []).map((n) => h("div", { class: "banner warn" }, n)),
+      h("div", { class: "table-scroll" }, h("table", { class: "bench-table" }, h("thead", {}, sumHead), h("tbody", {}, ...sumRows))),
+      h("p", { class: "note" }, `Scores come from the judge model (${r.judge || "?"}) and are only as good as it is: open an answer to check its findings. Speed is measured with ${models[0]?.parallel || "?"} answers at a time.`)),
+      ...cases);
+  }
+  async function removeBench(b, active) {
+    if (!active && !confirm("Delete this benchmark and the runs it made?")) return;
+    try {
+      await api("DELETE", `/v1/benchmarks/${b.id}`);
+      toast(active ? "Cancelling…" : "Benchmark deleted");
+      if (!active) selected = null;
+      await loadList();
+    } catch (e) { toast(e.message, true); }
+  }
+
+  const poll = setInterval(() => { if (detail && ACTIVE.has(detail.status)) loadList(); }, 3000);
+  loadChats();
+  onModels();
+  loadList();
+  return { el, renderPublished, onModels, destroy() { clearInterval(poll); } };
 }
 
 // Shared add/edit form for a pool model. Reasoning maps to LM Studio's

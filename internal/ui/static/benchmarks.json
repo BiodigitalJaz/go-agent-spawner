@@ -1,0 +1,65 @@
+{
+  "retrieved": "2026-10-18",
+  "gpu_note": "Suggested quants assume one 16 GB GPU with room for the KV cache.",
+  "source_note": "Scores are vendor self-reported, collected from llm-stats.com benchmark pages and the official Hugging Face model cards. No candidate publishes a hallucination or source-faithfulness score: use the replay benchmark below for those.",
+  "benchmarks": [
+    { "key": "ifeval", "name": "IFEval", "about": "instruction following" },
+    { "key": "ifbench", "name": "IFBench", "about": "harder instruction following" },
+    { "key": "gpqa", "name": "GPQA", "about": "graduate-level science knowledge" },
+    { "key": "mmlu_pro", "name": "MMLU-Pro", "about": "broad knowledge and reasoning" },
+    { "key": "tau", "name": "τ-bench", "about": "agentic tool use (τ2 or τ3)" }
+  ],
+  "models": [
+    {
+      "name": "Qwen3.5-9B", "match": ["qwen3.5-9b"], "params": "9B dense", "context": "262K",
+      "fits": "Q8_0 · 10.4 GB", "license": "Apache 2.0", "released": "2026-03",
+      "scores": { "ifeval": 91.5, "ifbench": 64.5, "gpqa": 81.7, "mmlu_pro": 82.5, "tau": 79.1 },
+      "lmstudio": "https://lmstudio.ai/models/qwen3.5",
+      "sources": ["https://huggingface.co/Qwen/Qwen3.5-9B", "https://llm-stats.com/benchmarks/ifbench"],
+      "note": "Current baseline. Hybrid attention: small KV cache, so 8 × 32k slots fit."
+    },
+    {
+      "name": "Qwen3.6-35B-A3B", "match": ["qwen3.6-35b-a3b"], "params": "35B MoE · 3B active", "context": "262K",
+      "fits": "UD-IQ3_S · 13.7 GB (or IQ3_XXS · 13.2 GB)", "license": "Apache 2.0", "released": "2026-04",
+      "scores": { "gpqa": 86.0, "mmlu_pro": 85.2, "tau": 67.2 },
+      "lmstudio": "https://lmstudio.ai/models/qwen3.6",
+      "gguf": "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF",
+      "sources": ["https://huggingface.co/Qwen/Qwen3.6-35B-A3B", "https://llm-stats.com/models/qwen3.6-35b-a3b"],
+      "note": "Biggest knowledge step that fits in VRAM; 3B active should run near the 9B's speed. Q2 quants likely hurt faithfulness."
+    },
+    {
+      "name": "Gemma 4 26B-A4B", "match": ["gemma-4-26b"], "params": "25B MoE · 3.8B active", "context": "256K",
+      "fits": "UD-IQ4_XS · 13.6 GB", "license": "Apache 2.0", "released": "2026-07",
+      "scores": { "gpqa": 82.3, "mmlu_pro": 82.6, "tau": 68.2 },
+      "lmstudio": "https://lmstudio.ai/models/gemma-4",
+      "gguf": "https://huggingface.co/unsloth/gemma-4-26b-a4b-it-GGUF",
+      "sources": ["https://huggingface.co/google/gemma-4-26b-a4b-it", "https://llm-stats.com/benchmarks/mmlu-pro"],
+      "note": "A different family from Qwen: a useful second opinion as reviewer or judge. The catalog Q4 build (15.6 GB) leaves no room for context."
+    },
+    {
+      "name": "Granite 4.2 8B", "match": ["granite-4.2-8b"], "params": "9B dense", "context": "128K",
+      "fits": "Q8_0 · 9.4 GB", "license": "Apache 2.0", "released": "2026-08",
+      "scores": { "ifbench": 79.3, "gpqa": 64.1, "mmlu_pro": 74.0, "tau": 58.1 },
+      "gguf": "https://huggingface.co/lmstudio-community/granite-4.2-8b-GGUF",
+      "sources": ["https://huggingface.co/ibm-granite/granite-4.2-8b", "https://llm-stats.com/benchmarks/ifbench"],
+      "note": "Best instruction following here, weaker knowledge: a fit for planner JSON and merging. Standard attention: about 5 GB of KV cache per 32k, so 2-3 slots."
+    },
+    {
+      "name": "Gemma 4 12B", "match": ["gemma-4-12b"], "params": "12B dense", "context": "256K",
+      "fits": "Q8_0 · 12.7 GB (or Q6_K · 9.8 GB)", "license": "Apache 2.0", "released": "2026-07",
+      "scores": { "gpqa": 78.8, "mmlu_pro": 77.2, "tau": 69.0 },
+      "lmstudio": "https://lmstudio.ai/models/gemma-4",
+      "gguf": "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF",
+      "sources": ["https://huggingface.co/google/gemma-4-12b-it"],
+      "note": "Dense alternative in the 9B's size class."
+    },
+    {
+      "name": "Qwen3.8-27B", "match": ["qwen3.8-27b"], "params": "28B dense", "context": "262K",
+      "fits": "Does not fit well: IQ3_S (13 GB) spilled out of VRAM (~4 tok/s)", "license": "unverified", "released": "2026",
+      "scores": { "ifbench": 79.5, "gpqa": 89.2 },
+      "lmstudio": "https://lmstudio.ai/models/qwen3.8",
+      "sources": ["https://llm-stats.com/benchmarks/gpqa"],
+      "note": "Strongest scores, but too big for 16 GB at a usable speed."
+    }
+  ]
+}

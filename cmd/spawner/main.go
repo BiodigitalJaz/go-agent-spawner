@@ -60,12 +60,19 @@ func buildVersion() string {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: spawner migrate|api|worker|all|mcp|user")
+		fmt.Fprintln(os.Stderr, "usage: spawner migrate|api|worker|all|mcp|user|config")
 		os.Exit(2)
 	}
 	if os.Args[1] == "user" {
 		if err := runUser(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "spawner user:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if os.Args[1] == "config" {
+		if err := runConfig(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "spawner config:", err)
 			os.Exit(1)
 		}
 		return
@@ -423,6 +430,22 @@ func runMCP() error {
 	if base == "" {
 		base = "http://localhost:8080"
 	}
+	auth := apiAuth()
+	console := os.Getenv("SPAWNER_CONSOLE_URL")
+	if console == "" {
+		console = base
+	}
+	srv := mcpserver.New(mcpserver.NewClient(base), mcpserver.Options{
+		DefaultAuth: auth, ConsoleURL: console, LocalFiles: true, Version: buildVersion(),
+	})
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return srv.Run(ctx, &mcp.StdioTransport{})
+}
+
+// apiAuth returns the Authorization header for the spawner API, from
+// SPAWNER_TOKEN, SPAWNER_TOKEN_FILE or ~/.config/agent-spawner/token.
+func apiAuth() string {
 	token := strings.TrimSpace(os.Getenv("SPAWNER_TOKEN"))
 	if token == "" {
 		file := os.Getenv("SPAWNER_TOKEN_FILE")
@@ -435,20 +458,10 @@ func runMCP() error {
 			token = strings.TrimSpace(string(b))
 		}
 	}
-	auth := ""
-	if token != "" {
-		auth = "Bearer " + token
+	if token == "" {
+		return ""
 	}
-	console := os.Getenv("SPAWNER_CONSOLE_URL")
-	if console == "" {
-		console = base
-	}
-	srv := mcpserver.New(mcpserver.NewClient(base), mcpserver.Options{
-		DefaultAuth: auth, ConsoleURL: console, LocalFiles: true, Version: buildVersion(),
-	})
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-	return srv.Run(ctx, &mcp.StdioTransport{})
+	return "Bearer " + token
 }
 
 // runUser manages console accounts. The password is read from stdin so it
