@@ -96,36 +96,42 @@ func TestFitToModel(t *testing.T) {
 	ref := strings.Repeat("r", 18_000) // ~6k tokens of reference
 	// 16k context: each agent has ~7k tokens left, so 16k-token parts shrink.
 	req := &createRequest{Prompt: "review", Parts: []agent.Part{{Title: "a", Text: "x"}}}
-	note, err := fitToModel(req, 16384, 0, ref)
+	note, err := fitToModel(req, 16384, 0, 0, ref)
 	if err != nil || req.MaxPartTokens <= 0 || req.MaxPartTokens >= 8000 || note == "" {
 		t.Fatalf("parts: max %d note %q err %v", req.MaxPartTokens, note, err)
 	}
 	// A 60k-character document needs more than one agent next to that reference.
 	req = &createRequest{Prompt: "summarize", Document: strings.Repeat("d", 60_000), Chunks: 1}
-	if note, err := fitToModel(req, 16384, 0, ref); err != nil || req.Chunks != 3 || note == "" {
+	if note, err := fitToModel(req, 16384, 0, 0, ref); err != nil || req.Chunks != 3 || note == "" {
 		t.Fatalf("document: chunks %d note %q err %v", req.Chunks, note, err)
 	}
 	// Enough room: nothing changes.
 	req = &createRequest{Prompt: "summarize", Document: strings.Repeat("d", 6_000), Chunks: 4}
-	if note, err := fitToModel(req, 32000, 0, ref); err != nil || req.Chunks != 4 || note != "" {
+	if note, err := fitToModel(req, 32000, 0, 0, ref); err != nil || req.Chunks != 4 || note != "" {
 		t.Fatalf("roomy: chunks %d note %q err %v", req.Chunks, note, err)
 	}
 	// The reference alone fills an 8k model.
-	if _, err := fitToModel(&createRequest{Prompt: "x"}, 8192, 0, ref); err == nil {
+	if _, err := fitToModel(&createRequest{Prompt: "x"}, 8192, 0, 0, ref); err == nil {
 		t.Fatal("a reference that leaves no room must be refused")
 	}
 	// Auto (chunks 0): a small document is read whole; a large one is split.
 	req = &createRequest{Prompt: "explain", Document: strings.Repeat("d", 9_600)} // ~2.4k tokens
-	if note, err := fitToModel(req, 32000, 0, ""); err != nil || req.Chunks != 1 || !strings.Contains(note, "read whole") {
+	if note, err := fitToModel(req, 32000, 0, 0, ""); err != nil || req.Chunks != 1 || !strings.Contains(note, "read whole") {
 		t.Fatalf("auto small: chunks %d note %q err %v", req.Chunks, note, err)
 	}
 	req = &createRequest{Prompt: "summarize", Document: strings.Repeat("d", 160_000)} // ~40k tokens
-	if note, err := fitToModel(req, 32000, 0, ""); err != nil || req.Chunks != 6 || !strings.Contains(note, "automatically") {
+	if note, err := fitToModel(req, 32000, 0, 0, ""); err != nil || req.Chunks != 6 || !strings.Contains(note, "automatically") {
 		t.Fatalf("auto large: chunks %d note %q err %v", req.Chunks, note, err)
+	}
+	// The worker model's safe chunk size caps the chunk size: ~40k tokens
+	// at 5000 per chunk is 8 chunks, not 6, and the note says why.
+	req = &createRequest{Prompt: "summarize", Document: strings.Repeat("d", 160_000)}
+	if note, err := fitToModel(req, 32000, 0, 5000, ""); err != nil || req.Chunks != 8 || !strings.Contains(note, "safe chunk size is 5000") {
+		t.Fatalf("safe chunk size: chunks %d note %q err %v", req.Chunks, note, err)
 	}
 	// An explicit count is kept.
 	req = &createRequest{Prompt: "explain", Document: strings.Repeat("d", 9_600), Chunks: 3}
-	if note, err := fitToModel(req, 32000, 0, ""); err != nil || req.Chunks != 3 || note != "" {
+	if note, err := fitToModel(req, 32000, 0, 0, ""); err != nil || req.Chunks != 3 || note != "" {
 		t.Fatalf("explicit: chunks %d note %q err %v", req.Chunks, note, err)
 	}
 	if got := agent.MaxReferenceChars(32000); got != 38_400 {

@@ -98,12 +98,15 @@ type CreateTree struct {
 	Search        bool   `json:"search,omitempty"`
 }
 
-func (c *Client) CreateTree(ctx context.Context, auth string, req CreateTree) (string, error) {
+// CreateTree starts a task and returns its id and, for a document, the
+// number of chunks the server split it into.
+func (c *Client) CreateTree(ctx context.Context, auth string, req CreateTree) (string, int, error) {
 	var out struct {
 		TreeID string `json:"tree_id"`
+		Chunks int    `json:"chunks"`
 	}
 	err := c.do(ctx, auth, http.MethodPost, "/v1/trees", req, &out)
-	return out.TreeID, err
+	return out.TreeID, out.Chunks, err
 }
 
 type Node struct {

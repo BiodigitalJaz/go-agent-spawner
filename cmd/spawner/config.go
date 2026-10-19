@@ -111,7 +111,7 @@ func (c apiClient) do(method, path string, body, out any) error {
 }
 
 // modelFields are the fields a console model is created with.
-var modelFields = []string{"name", "model", "endpoints", "initial_limit", "max_limit", "extra", "context_length", "slots", "shared_context"}
+var modelFields = []string{"name", "model", "endpoints", "initial_limit", "max_limit", "extra", "context_length", "slots", "shared_context", "chunk_tokens"}
 
 func (c apiClient) export() (*configFile, error) {
 	var st struct {

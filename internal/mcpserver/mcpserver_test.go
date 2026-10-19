@@ -15,16 +15,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func TestAutoChunks(t *testing.T) {
-	for _, c := range []struct{ tokens, want int }{
-		{100, 1}, {6000, 1}, {6001, 4}, {30000, 4}, {30001, 5}, {60000, 8}, {500000, 16},
-	} {
-		if got := AutoChunks(strings.Repeat("abcd", c.tokens)); got != c.want {
-			t.Errorf("AutoChunks(%d tokens) = %d, want %d", c.tokens, got, c.want)
-		}
-	}
-}
-
 func write(t *testing.T, root, rel string, data []byte) {
 	t.Helper()
 	p := filepath.Join(root, rel)
@@ -96,7 +86,7 @@ func (f *fakeAPI) handler() http.Handler {
 			fmt.Fprint(w, `{"error":"authentication required"}`)
 			return
 		}
-		fmt.Fprint(w, `{"tree_id":"t1"}`)
+		fmt.Fprint(w, `{"tree_id":"t1","chunks":4}`)
 	})
 	mux.HandleFunc("GET /v1/trees/t1/events", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -192,7 +182,7 @@ func TestToolsOverStdioStyleSession(t *testing.T) {
 	}
 	defer pc.Close()
 
-	doc := strings.Repeat("word ", 10000) // ~12.5k tokens -> 4 chunks
+	doc := strings.Repeat("word ", 10000) // the server picks the chunks (it knows the model's safe size)
 	params := &mcp.CallToolParams{Name: "run_task", Arguments: map[string]any{"prompt": "summarize", "document": doc, "merge": "list"}}
 	params.SetProgressToken("p1")
 	res, err := pc.CallTool(ctx, params)
@@ -203,7 +193,7 @@ func TestToolsOverStdioStyleSession(t *testing.T) {
 	if res.IsError || !strings.HasPrefix(out, "merged answer") || !strings.Contains(out, "failed parts: Part 2/2") || !strings.Contains(out, "console: http://console/#/runs/t1") {
 		t.Fatalf("run_task result (error=%v):\n%s", res.IsError, out)
 	}
-	if c := api.created[0]; c.Chunks != 4 || c.Merge != "list" || c.Document != doc || api.auths[0] != "Bearer tok" {
+	if c := api.created[0]; c.Chunks != 0 || c.Merge != "list" || c.Document != doc || api.auths[0] != "Bearer tok" {
 		t.Fatalf("request sent: chunks=%d merge=%q auth=%q", c.Chunks, c.Merge, api.auths[0])
 	}
 	pmu.Lock()

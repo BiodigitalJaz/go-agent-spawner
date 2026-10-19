@@ -57,6 +57,11 @@ type ModelConfig struct {
 	// limit. Requests are then admitted only while their estimated tokens fit
 	// the pool, across all workers.
 	SharedContext bool `json:"shared_context,omitempty"`
+	// ChunkTokens is the model's safe chunk size: the largest document
+	// chunk (estimated tokens, chars/4) it reads without missing facts.
+	// Automatic chunking never makes chunks larger; 0 means the default
+	// rule. Measure it with experiments/chunking/chunk_size_sweep.py.
+	ChunkTokens int `json:"chunk_tokens,omitempty"`
 }
 
 // NameRE constrains routing names: they become River queue names ("llm_<name>").
