@@ -36,6 +36,8 @@ type TreeRequest struct {
 	// Context is reference material sent to every agent in the tree (a
 	// fetched page, rules to respect). Stored once with the tree.
 	Context string
+	// History is the conversation before Prompt (chat), oldest first.
+	History []settings.Turn
 	// PartMaxWords, when > 0, asks each part's agent for an answer under
 	// that many words. The merge still gets the unchanged prompt, so the
 	// final answer keeps its length. Per-part work is output-bound, so short
@@ -105,6 +107,7 @@ func partPrompt(instruction string, p Part, i, n int) string {
 func startChunked(ctx context.Context, db *pgxpool.Pool, client *river.Client[pgx.Tx], req TreeRequest) (*StartedTree, error) {
 	set := req.Settings
 	set.Context = req.Context
+	set.History = req.History
 	set.PartMaxWords = req.PartMaxWords
 	id := uuid.New()
 	parts := req.Parts
@@ -159,6 +162,7 @@ func startChunked(ctx context.Context, db *pgxpool.Pool, client *river.Client[pg
 func startPlanned(ctx context.Context, db *pgxpool.Pool, client *river.Client[pgx.Tx], req TreeRequest) (*store.Node, error) {
 	set := req.Settings
 	set.Context = req.Context
+	set.History = req.History
 	set.PartMaxWords = req.PartMaxWords
 	id := uuid.New()
 	args := TaskArgs{TreeID: id, NodeID: id, Role: RolePlan, Model: set.Planner.Model, Priority: req.Priority}

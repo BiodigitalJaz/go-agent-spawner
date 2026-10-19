@@ -71,6 +71,20 @@ func TestReference(t *testing.T) {
 	if len(ref) > maxContextChars+200 {
 		t.Fatalf("reference is %d chars, over the cap", len(ref))
 	}
+	// Chat (soft fetch): a link that fails becomes a note, not an error; the
+	// pages that did open are still used.
+	_, _, err = s.reference(ctx, &createRequest{Prompt: "Compare " + page.URL + " and http://127.0.0.1:1/dead", FetchURLs: true, softFetch: true}, settings.Settings{AllowInternalFetch: true}, "test", maxContextChars)
+	if err != nil {
+		t.Fatalf("soft fetch must not fail: %v", err)
+	}
+	ref, fetched, err = s.reference(ctx, &createRequest{Prompt: "Read http://127.0.0.1:1/dead", FetchURLs: true, softFetch: true}, settings.Settings{AllowInternalFetch: true}, "test", maxContextChars)
+	if err != nil || len(fetched) != 1 || fetched[0].Error == "" || !strings.Contains(ref, "LINKS THAT COULD NOT BE OPENED") || strings.Contains(ref, "PAGES LINKED") {
+		t.Fatalf("soft fetch of a dead link: %v %+v\n%s", err, fetched, ref)
+	}
+	// Without soft fetch the same link fails the request.
+	if _, _, err := s.reference(ctx, &createRequest{Prompt: "Read http://127.0.0.1:1/dead", FetchURLs: true}, settings.Settings{AllowInternalFetch: true}, "test", maxContextChars); err == nil {
+		t.Fatal("a dead link must fail a normal run")
+	}
 	// Oversized context is refused rather than silently cut.
 	_, _, err = s.reference(ctx, &createRequest{Prompt: "x", Context: strings.Repeat("a", maxContextChars+1)}, settings.Settings{}, "test", maxContextChars)
 	if status(err) != http.StatusBadRequest {

@@ -197,3 +197,28 @@ func TestPasswordChangeAndRevocation(t *testing.T) {
 		t.Fatalf("disabled account login: %d", w.Code)
 	}
 }
+
+func TestPrincipalAndLateAccounts(t *testing.T) {
+	users := &memUsers{users: map[uuid.UUID]*User{}}
+	a := New(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, time.Hour)
+	if err := a.WithUsers(context.Background(), users); err != nil {
+		t.Fatal(err)
+	}
+	var seen string
+	h := a.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { seen = Principal(r.Context()); w.WriteHeader(200) }))
+	if w := do(h, "GET", "/v1/trees", nil); w.Code != 200 {
+		t.Fatalf("no accounts, no tokens: open, got %d", w.Code)
+	}
+	// The first account turns authentication on without a restart.
+	hash, _ := HashPassword(pw)
+	u := &User{ID: uuid.New(), Email: "late@example.com", Hash: hash}
+	users.users[u.ID] = u
+	a.refreshUsersExist(context.Background())
+	if w := do(h, "GET", "/v1/trees", nil); w.Code != 401 {
+		t.Fatalf("after the first account: want 401, got %d", w.Code)
+	}
+	value, exp := a.newUserSession(u)
+	if w := do(h, "GET", "/v1/trees", func(r *http.Request) { r.AddCookie(&http.Cookie{Name: CookieName, Value: value, Expires: exp}) }); w.Code != 200 || seen != "late@example.com" {
+		t.Fatalf("account session: %d principal %q", w.Code, seen)
+	}
+}
