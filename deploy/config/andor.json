@@ -1,5 +1,5 @@
 {
-  "exported_at": "2026-10-19T01:52:34Z",
+  "exported_at": "2026-10-19T14:54:06Z",
   "from": "http://192.168.1.64:30880",
   "settings_version": 11,
   "settings": {
@@ -24,6 +24,21 @@
     }
   },
   "models": [
+    {
+      "context_length": 32000,
+      "endpoints": [
+        "http://192.168.1.76:1234"
+      ],
+      "extra": {
+        "reasoning_effort": "none"
+      },
+      "initial_limit": 4,
+      "max_limit": 4,
+      "model": "google/gemma-4-12b",
+      "name": "gemma-4-12b-fast",
+      "shared_context": true,
+      "slots": 8
+    },
     {
       "context_length": 32000,
       "endpoints": [
