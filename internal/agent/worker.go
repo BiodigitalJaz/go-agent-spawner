@@ -79,6 +79,9 @@ type task struct {
 	// check's rewrite replaces the answer once, when it is done, instead of
 	// streaming a second copy for the reader to read again.
 	quiet bool
+	// schema constrains generations to a JSON schema (a root answer with
+	// settings.ResponseSchema).
+	schema *llm.Schema
 }
 
 func (t *task) event(typ events.Type, role Role) events.Event {
@@ -335,7 +338,11 @@ func (w *Worker) direct(ctx context.Context, t *task) error {
 func (w *Worker) exec(ctx context.Context, t *task, lease *backend.Lease) error {
 	w.publish(ctx, t.event(events.NodeStarted, RoleExec))
 	msgs := execMessages(t.set, t.node)
+	if t.node.ParentID == nil && len(t.set.ResponseSchema) > 0 {
+		t.schema = &llm.Schema{Name: "answer", Schema: t.set.ResponseSchema}
+	}
 	out, stats, lease, err := w.generateRetrying(ctx, t, RoleExec, t.job.Args.Model, t.set.Worker, msgs, lease)
+	t.schema = nil
 	if err != nil {
 		return err
 	}
@@ -549,6 +556,7 @@ func (w *Worker) reduceInCode(ctx context.Context, t *task) error {
 // generate streams a completion, forwarding deltas to the bus, and releases
 // the lease as soon as generation ends so the slot frees before any DB work.
 func (w *Worker) generate(ctx context.Context, t *task, lease *backend.Lease, req llm.Request) (string, llm.Stats, error) {
+	req.JSONSchema = t.schema
 	content := w.bus.Deltas(events.Delta, t.node.TreeID, t.node.ID, w.cfg.DeltaInterval)
 	thinking := w.bus.Deltas(events.Thinking, t.node.TreeID, t.node.ID, w.cfg.DeltaInterval)
 	out, stats, err := lease.Endpoint.Client.Stream(ctx, req, func(kind llm.DeltaKind, text string) {

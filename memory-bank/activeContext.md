@@ -6,6 +6,15 @@ _Last updated: 2026-10-18_
 **Deployed and live** on the user's cluster: namespace `agent-spawner`, console at http://192.168.1.64:30880 (NodePort 30880 on any node). See deployment.md for every detail. Next steps depend on the user.
 
 ## Recent changes
+### 2026-10-19: benchmark fixes (0.1.56, branch `feat/bench-fixes`, builds on PR #23)
+- Analysis of the user's Gemma 4 12B vs Qwen 3.5 9B benchmark (Wyze chat, 1 case): judge (gemma) scored both 0/0/0, but Qwen had 4 claims not in the sources (Bluetooth travel mode, time-lapse, group-view battery, "v3 no IR LEDs"), Gemma ~1. Gemma's 4 answers ran one at a time (LM Studio loaded it with 1 slot; pool entry has no slots/context): ~22 tok/s total vs Qwen ~100, while per answer Gemma was faster (50 vs 35 tok/s). The swap restored Qwen at 32k/8 slots. The "Guardian & Scholar" chat replayed only a 293-char role header (no task).
+- Judge: "unsupported" = specific claims about what the sources cover (specs, features, prices, dates, rules), never general know-how; `dropSourced` drops findings whose numbers all appear in the reference; output capped at 1024 tokens, temperature 0.2, "each finding once, max 6" — a temp-0 uncapped 9B judge looped for 86k chars on the pork-shoulder case (JOB_TIMEOUT 10m would then retry it).
+- Speed: `ran_at_once` = peak overlap of answers' generation intervals (finished_at − duration); a note when below `parallel`; with swap, `checkSlots` notes LM Studio's loaded slot count.
+- Standard test set (`benchSuite`, 8 messages): `suite: true`; sources collected once (search auto, depth 0) and reused by later suite runs (`reuseSuite`: latest suite benchmark whose source trees still exist); `refresh` recollects.
+- Judge output is constrained by `settings.ResponseSchema` (per run; root exec passes it as response_format json_schema via `task.schema`): a free-form 9B judge misplaced quotes (1 of 8 unparseable).
+- Live test-set runs with qwen9b-fast (judge qwen9b-fast, 4 streams): ~60 s answering, ~73-77 s total with reused sources; ~102 tok/s total, ~33 tok/s per answer, ran 4 at once. Judge noise is large: slips 5 → 2 → 9 across three runs of the same model and sources, and several "slips" were wrong (e.g. said the Wyze base station is not required; flagged NPS's correct 100 yd bear distance). Compare models within one benchmark, repeat runs, and prefer a different-family or stronger judge.
+- Pending user action: in LM Studio set Gemma's parallel slots (4-8) and 32k context, then set the pool entry's slots/context.
+
 ### 2026-10-18: benchmarking, config in git, opt-in source check (0.1.53, branch `feat/benchmarking`)
 - Chat "Check sources" checkbox (localStorage `chat.check`, default off); API `source_check` on messages/retry (default false).
 - `spawner config export|import [-dry-run]` (cmd/spawner/config.go): via the API (SPAWNER_URL + token like `spawner mcp`); file = settings + console models (source "ui"). Live config committed as `deploy/config/andor.json` (settings v11). Import: models first (POST/PUT), then PUT settings with the current version if any key differs.
