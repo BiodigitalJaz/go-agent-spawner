@@ -173,10 +173,13 @@ func (s *Server) purgeRun(ctx context.Context, id uuid.UUID) error {
 }
 
 type chatMessageRequest struct {
-	Content   string `json:"content"`
-	Model     string `json:"model,omitempty"`
-	Search    bool   `json:"search,omitempty"`
-	FetchURLs *bool  `json:"fetch_urls,omitempty"` // default true
+	Content string `json:"content"`
+	Model   string `json:"model,omitempty"`
+	Search  bool   `json:"search,omitempty"` // older clients: same as search_mode "on"
+	// SearchMode: "auto" (default; search when the question needs current
+	// or local facts), "on" or "off".
+	SearchMode string `json:"search_mode,omitempty"`
+	FetchURLs  *bool  `json:"fetch_urls,omitempty"` // default true
 	// Deep lets the planner split the reply across the agent pool; by
 	// default one agent answers, which is fastest for conversation.
 	Deep bool `json:"deep,omitempty"`
@@ -217,7 +220,17 @@ func (s *Server) sendChatMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	req := createRequest{Prompt: content, Model: body.Model, Search: body.Search, FetchURLs: body.FetchURLs == nil || *body.FetchURLs, softFetch: true}
+	req := createRequest{Prompt: content, Model: body.Model, FetchURLs: body.FetchURLs == nil || *body.FetchURLs, softFetch: true}
+	switch {
+	case body.Search || body.SearchMode == "on":
+		req.Search = s.SearchEnabled // forced; never an error in chat
+	case body.SearchMode == "" || body.SearchMode == "auto":
+		req.SearchAuto = true
+	case body.SearchMode == "off":
+	default:
+		httpError(w, http.StatusBadRequest, `search_mode must be "auto", "on" or "off"`)
+		return
+	}
 	if !body.Deep {
 		zero := 0
 		req.MaxDepth = &zero

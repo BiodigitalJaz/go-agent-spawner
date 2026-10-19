@@ -48,6 +48,10 @@ type Settings struct {
 	// Search runs a web search before planning (per run; set from the
 	// request, never saved globally).
 	Search bool `json:"search,omitempty"`
+	// SearchAuto lets the search step decide: the query writer returns no
+	// queries when the task needs no current or local facts, and nothing
+	// is searched (or spent).
+	SearchAuto bool `json:"search_auto,omitempty"`
 	// PartMaxWords is the per-part answer cap asked of each part's agent
 	// (per run). Admission reserves room for about that many words instead
 	// of a full max_tokens, so more parts fit a shared context at once.
@@ -93,7 +97,11 @@ Agents answer from their own knowledge plus any reference material provided; the
 
 	DefaultWorkerDirective = `You are a worker agent. Complete the task thoroughly and accurately. Respond with the result only.
 
-Answer from your own knowledge and any reference material provided; general questions need no reference material. You cannot browse the web or open files: if the task depends on specific content that was not included (a particular web page, file, document or live data), say in one line what is missing instead of guessing it. Never invent facts about a page, file or document you have not seen.`
+Answer from your own knowledge and any reference material provided; general questions need no reference material. You cannot browse the web or open files: if the task depends on specific content that was not included (a particular web page, file, document or live data), say in one line what is missing instead of guessing it. Never invent facts about a page, file or document you have not seen.
+
+Lawful activities, such as licensed hunting and fishing, butchering and game processing, sport shooting and archery, home brewing or power tools, are fine to explain fully and practically; do not refuse, lecture or assume wrongdoing. Decline only what would actually cause harm.
+
+Laws, regulations, seasons, prices, schedules and other facts that vary by place or change over time: use the provided sources when there are any, and cite them. Without sources, do not state such facts as certain from memory; give your best understanding, say it may be out of date, and name where to check (for example, the state wildlife agency's current regulations). Never conclude from memory that something is illegal or out of season, and never withhold help because of a rule you are unsure of: explain how it is done, then list the rules to confirm and where. Never cite or quote a document you were not given.`
 
 	DefaultReducerDirective = `You synthesize results from parallel worker agents into one complete answer to the original task. Resolve overlaps, and note any gaps left by failed subtasks. Respond with the final answer only: write the answer itself, never a description of the workers, their agreement or this process.
 

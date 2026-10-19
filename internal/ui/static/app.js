@@ -163,6 +163,7 @@ async function refreshModels() {
 async function loadSettings() {
   app.settings = await api("GET", "/v1/settings");
   app.searchEnabled = !!app.settings.search_enabled;
+  app.view?.onModels?.(); // views that show search controls follow the setting
   return app.settings;
 }
 
@@ -1036,10 +1037,24 @@ function chatView(root, initialId) {
   // ---- thread ----
   const thread = h("div", { class: "chat-thread", "aria-live": "polite" });
   const input = h("textarea", { placeholder: "Message the agent…  (Enter to send, Shift+Enter for a new line)", "aria-label": "Message", rows: 3 });
-  const fetchBox = h("input", { type: "checkbox", checked: true, "aria-label": "Fetch links" });
-  const searchBox = h("input", { type: "checkbox", "aria-label": "Search the web" });
-  const deepBox = h("input", { type: "checkbox", "aria-label": "Agent pool" });
-  const searchLabel = h("label", { class: "check", hidden: !app.searchEnabled, title: "Search the web first and answer from the results, with sources" }, searchBox, " Search the web");
+  // Per-viewer preferences (best effort: storage may be blocked).
+  const pref = (k, d) => { try { return localStorage.getItem(`chat.${k}`) ?? d; } catch { return d; } };
+  const savePref = (k, v) => { try { localStorage.setItem(`chat.${k}`, v); } catch {} };
+  // Search: Auto (search only when the question needs current or local
+  // facts), On, Off. Links in a message are always read.
+  let searchMode = pref("search", "auto");
+  const modeBtns = ["auto", "on", "off"].map((m) => h("button", { type: "button", class: "mode-btn", "data-mode": m,
+    "aria-pressed": String(m === searchMode), onclick: () => setMode(m) }, m === "auto" ? "Auto" : m === "on" ? "On" : "Off"));
+  function setMode(m) {
+    searchMode = m;
+    savePref("search", m);
+    for (const b of modeBtns) b.setAttribute("aria-pressed", String(b.dataset.mode === m));
+  }
+  const searchCtl = h("div", { class: "mode", role: "group", "aria-label": "Web search", hidden: !app.searchEnabled,
+    title: "Web search. Auto: only when the question needs current or local facts (laws, prices, schedules, recent events). On: always. Off: never." },
+    h("span", { class: "mode-label" }, "Search"), ...modeBtns);
+  const deepBox = h("input", { type: "checkbox", "aria-label": "Agent pool", checked: pref("deep", "0") === "1",
+    onchange: (e) => savePref("deep", e.target.checked ? "1" : "0") });
   const send = h("button", { class: "btn primary", onclick: () => submit() }, "Send");
   const stop = h("button", { class: "btn danger", hidden: true, onclick: () => stopReply() }, "Stop");
   const title = h("h2", { class: "chat-title" });
@@ -1048,9 +1063,8 @@ function chatView(root, initialId) {
   input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit(); } });
   main.append(head, thread, h("div", { class: "chat-compose" }, input,
     h("div", { class: "chat-opts" },
-      h("label", { class: "check", title: "Read pages linked in your message" }, fetchBox, " Fetch links"),
-      searchLabel,
-      h("label", { class: "check", title: "Let the planner split the reply across parallel agents (slower; for big asks)" }, deepBox, " Agent pool"),
+      searchCtl,
+      h("label", { class: "check", title: "Split the reply across parallel agents: slower, for big requests (long reports, many parts)" }, deepBox, " Agent pool"),
       h("span", { class: "grow" }), stop, send)));
 
   function bubble(role) {
@@ -1080,7 +1094,7 @@ function chatView(root, initialId) {
     thread.replaceChildren();
     title.textContent = "New chat";
     del.hidden = !id;
-    if (!id) { input.focus(); return; }
+    if (!id) { focusInput(); return; }
     let d;
     try { d = await api("GET", `/v1/chats/${id}`); } catch (e) {
       thread.replaceChildren(h("div", { class: "empty" }, e.status === 404 ? "Conversation not found." : e.message));
@@ -1095,8 +1109,10 @@ function chatView(root, initialId) {
       else showReply(b, m);
     }
     scrollDown();
-    input.focus();
+    focusInput();
   }
+  // On touch devices focusing would scroll the page and pop up the keyboard.
+  function focusInput() { if (!matchMedia("(pointer: coarse)").matches) input.focus(); }
 
   // follow streams a reply: deltas of the root agent, plus status notes.
   function follow(tree, b) {
@@ -1173,7 +1189,7 @@ function chatView(root, initialId) {
         history.replaceState(null, "", `#/chat/${id}`); // no re-render: stay in this thread
         del.hidden = false;
       }
-      const res = await api("POST", `/v1/chats/${id}/messages`, { content, fetch_urls: fetchBox.checked, search: searchBox.checked, deep: deepBox.checked });
+      const res = await api("POST", `/v1/chats/${id}/messages`, { content, search_mode: app.searchEnabled ? searchMode : "off", deep: deepBox.checked });
       input.value = "";
       const ub = bubble("user");
       ub.body.textContent = content;
@@ -1206,7 +1222,7 @@ function chatView(root, initialId) {
   return {
     name: "chat",
     select: (id) => { if (id !== current) open(id); },
-    onModels: () => { searchLabel.hidden = !app.searchEnabled; },
+    onModels: () => { searchCtl.hidden = !app.searchEnabled; },
     destroy() { destroyed = true; closeStream(); },
   };
 }

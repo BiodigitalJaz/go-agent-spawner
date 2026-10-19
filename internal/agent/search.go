@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/backend"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/events"
@@ -25,7 +26,20 @@ const (
 	searchMarker     = "=== WEB SEARCH RESULTS"
 )
 
-func searchSchema() *llm.Schema {
+func searchSchema(auto bool) *llm.Schema {
+	if auto {
+		// The decision comes first, as its own field: small models asked to
+		// "return an empty list when no search is needed" searched anyway.
+		return &llm.Schema{Name: "search_queries", Schema: json.RawMessage(fmt.Sprintf(`{
+  "type": "object",
+  "properties": {
+    "search_needed": {"type": "boolean"},
+    "queries": {"type": "array", "minItems": 0, "maxItems": %d, "items": {"type": "string"}}
+  },
+  "required": ["search_needed", "queries"],
+  "additionalProperties": false
+}`, maxSearchQueries))}
+	}
 	return &llm.Schema{Name: "search_queries", Schema: json.RawMessage(fmt.Sprintf(`{
   "type": "object",
   "properties": {"queries": {"type": "array", "minItems": 0, "maxItems": %d, "items": {"type": "string"}}},
@@ -37,6 +51,12 @@ func searchSchema() *llm.Schema {
 const searchQueryDirective = `You write web search queries. Given a task, return up to 3 short keyword queries (3 to 8 words each) that would find pages with the information the task needs. Use the words such pages would contain, not the task's instructions. Do not answer the task.
 
 If the task is about specific pages that were already fetched (listed below the task) and they are enough on their own (for example, summarizing or reviewing one page), return an empty list: searching would only add unrelated pages. Search only for information those pages do not contain.`
+
+// searchAutoRule is added when search is on "auto": the query writer also
+// decides whether searching is worth it at all.
+const searchAutoRule = `
+
+Decide first whether to search at all, and say so in search_needed. Most questions need no search: set search_needed to false (and return no queries) for explanations, how-tos and techniques (cooking, smoking, butchering, repairs, crafts), tips, writing, code, recipes and opinions. Set it to true only when the answer depends on facts that are current, local or likely to have changed: laws and regulations, seasons, prices, schedules, specific products or businesses, recent events, or anything the user asks to look up.`
 
 // search runs the root's web search: the planner model writes queries,
 // SearXNG returns results, the top pages are fetched (through the
@@ -58,24 +78,34 @@ func (w *Worker) search(ctx context.Context, t *task, lease *backend.Lease) (*ba
 	w.publish(ctx, t.event(events.NodeStarted, RolePlan))
 	note.Write("Searching the web: writing queries…\n")
 	var q struct {
-		Queries []string `json:"queries"`
+		SearchNeeded *bool    `json:"search_needed"`
+		Queries      []string `json:"queries"`
 	}
 	linked := linkedPages(t.set.Context)
-	user := "Task:\n" + conversationBlock(t.set, t.node) + t.node.Prompt
+	// The date keeps "this year" and "right now" queries from naming the
+	// model's training year.
+	user := "Today's date: " + time.Now().Format("January 2, 2006") + "\n\nTask:\n" + conversationBlock(t.set, t.node) + t.node.Prompt
 	if len(linked) > 0 {
 		user += "\n\nPages from the task's links, already fetched:\n- " + strings.Join(linked, "\n- ")
 	}
+	directive := searchQueryDirective
+	if t.set.SearchAuto {
+		directive += searchAutoRule
+	}
 	req := request(lease, t.set.Planner, []llm.Message{
-		{Role: "system", Content: searchQueryDirective},
+		{Role: "system", Content: directive},
 		{Role: "user", Content: user},
 	})
-	req.JSONSchema = searchSchema()
+	req.JSONSchema = searchSchema(t.set.SearchAuto)
 	stats, err := lease.Endpoint.Client.JSON(ctx, req, &q, nil)
 	lease.Done(stats, err)
 	switch {
 	case len(linked) > 0 && (err != nil || len(q.Queries) == 0):
 		// The task's own pages are in hand: no search beats a noisy one.
 		note.Write("Search skipped: the pages linked in the task cover it.\n")
+		return w.reacquire(ctx, t)
+	case t.set.SearchAuto && (err != nil || len(q.Queries) == 0 || (q.SearchNeeded != nil && !*q.SearchNeeded)):
+		note.Write("Search not needed for this question.\n")
 		return w.reacquire(ctx, t)
 	case err != nil || len(q.Queries) == 0:
 		q.Queries = []string{t.node.Prompt} // the user asked to search: use the task itself

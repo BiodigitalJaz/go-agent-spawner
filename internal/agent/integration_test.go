@@ -994,6 +994,46 @@ func TestChatStore(t *testing.T) {
 	}
 }
 
+// Search on "auto": when the query writer sees no need (it returns no
+// queries), nothing is searched.
+func TestSearchAutoSkipsWhenNotNeeded(t *testing.T) {
+	var calls atomic.Int32
+	searx := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		fmt.Fprint(w, `{"results":[]}`)
+	}))
+	defer searx.Close()
+	llm := &fakeLLM{searcher: fetch.NewMulti(slog.New(slog.NewTextHandler(io.Discard, nil)), fetch.NewSearcher(searx.URL, ""))}
+	h := setup(t, llm)
+	set := h.set
+	set.Search, set.SearchAuto, set.MaxDepth, set.CheckAnswer = true, true, 0, false
+	started, err := agent.StartTree(context.Background(), h.db, h.client, agent.TreeRequest{
+		Prompt: "Explain how a smoker keeps a steady temperature.", Priority: 1, Settings: set,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evs := h.collect(t, started.Root.TreeID); evs[len(evs)-1].Type != events.TreeDone {
+		t.Fatal("tree failed")
+	}
+	snap, _ := settings.ForTree(context.Background(), h.db, started.Root.TreeID)
+	if calls.Load() != 0 || strings.Contains(snap.Context, "WEB SEARCH RESULTS") {
+		t.Fatalf("auto search should not have searched: %d calls", calls.Load())
+	}
+	// The query writer was told it may decide not to search.
+	llm.mu.Lock()
+	defer llm.mu.Unlock()
+	told := false
+	for _, c := range llm.convs {
+		if len(c) > 0 && strings.Contains(c[0], "Decide first whether to search at all") {
+			told = true
+		}
+	}
+	if !told {
+		t.Fatal("the auto rule was not given to the query writer")
+	}
+}
+
 func TestPurgeTreeRemovesEveryRecord(t *testing.T) {
 	h := setup(t, &fakeLLM{split: []string{"one", "two"}})
 	ctx := context.Background()
@@ -1271,6 +1311,9 @@ func TestDenseTextCalibratesAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	set := h.set
+	// A short, fixed directive keeps the request sizes this test relies on
+	// independent of the default directives.
+	set.Worker.Directive = "You are a worker."
 	set.Merge = settings.MergeList
 	started, err := agent.StartTree(context.Background(), h.db, h.client, agent.TreeRequest{
 		Prompt: "List every service and port.", Priority: 1, Settings: set, Document: testDocument(60), Chunks: 6,
