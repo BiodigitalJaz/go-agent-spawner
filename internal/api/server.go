@@ -61,6 +61,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/trees/{id}", s.getTree)
 	mux.HandleFunc("DELETE /v1/trees/{id}", s.cancelTree)
 	s.chatRoutes(mux)
+	s.benchRoutes(mux)
 	mux.HandleFunc("GET /v1/trees/{id}/events", s.streamTree)
 	mux.HandleFunc("GET /v1/events", s.streamAll)
 	mux.HandleFunc("GET /v1/settings", s.getSettings)

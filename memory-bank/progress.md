@@ -3,6 +3,10 @@
 ## Status: v0 and web console DEPLOYED to the andor cluster (2026-10-12), console on NodePort 30880
 
 
+## What works (verified 2026-10-18, 0.1.53): benchmarking and config export
+- Replay benchmark end-to-end on the cluster (one model, no swap); published-scores table shows installed models; `spawner config export/import -dry-run` round-trips the live config (no changes).
+- Known limits: the judge is the 9B by default and misfiles some findings; swap mode untested live.
+
 ## What works (verified 2026-10-18, 0.1.51): grounded chat answers
 - Crossbow/turkey prompt: no refusal (single and pool), crossbows legal in archery fall turkey with dates and specs from ODWC pages, no invented permit fee, full recipes. "See X" link followed. Retry endpoint replaces the reply and purges the old run (404). Phone footer: no overflow.
 - Known limit: the 9B model still slips on general knowledge it is not given (anatomy terms, part counts); grounding only covers place/time facts.

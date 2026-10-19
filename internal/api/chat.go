@@ -184,6 +184,9 @@ type chatMessageRequest struct {
 	// Deep lets the planner split the reply across the agent pool; by
 	// default one agent answers, which is fastest for conversation.
 	Deep bool `json:"deep,omitempty"`
+	// SourceCheck reviews a reply written from search results against them
+	// (off by default: it adds a second pass and replaces the answer).
+	SourceCheck bool `json:"source_check,omitempty"`
 }
 
 func (s *Server) sendChatMessage(w http.ResponseWriter, r *http.Request) {
@@ -240,7 +243,7 @@ func (s *Server) sendChatMessage(w http.ResponseWriter, r *http.Request) {
 // conversation in msgs as its history. It has written the error response
 // when ok is false.
 func (s *Server) startChatRun(w http.ResponseWriter, r *http.Request, body chatMessageRequest, content string, msgs []store.ChatMessage) (map[string]any, uuid.UUID, bool) {
-	req := createRequest{Prompt: content, Model: body.Model, FetchURLs: body.FetchURLs == nil || *body.FetchURLs, softFetch: true, SourceCheck: true}
+	req := createRequest{Prompt: content, Model: body.Model, FetchURLs: body.FetchURLs == nil || *body.FetchURLs, softFetch: true, SourceCheck: body.SourceCheck}
 	switch {
 	case body.Search || body.SearchMode == "on":
 		req.Search = s.SearchEnabled // forced; never an error in chat

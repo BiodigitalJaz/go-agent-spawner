@@ -46,7 +46,7 @@ GET /v1/trees/{id}/events ◄── SSE from NATS (replay + Last-Event-ID resume
 The **Chat** tab is a conversational agent. Each reply is a run whose root agent sees the conversation so far (as chat turns), so chat uses the same pool, models and live streaming as runs.
 - **Links** in your message are always read; a link that can't be opened is reported in the reply instead of failing the message.
 - **Search** (shown when a search backend is configured): **Auto** (the default) searches when the answer depends on current or local facts such as regulations, seasons, licenses, prices or schedules: questions that mention those (or a US state, a year, "near me") are always searched, and the model decides the rest, searching when unsure. **On** always searches; **Off** never does. Auto keeps general questions (how-tos, explanations, code) off the search quota.
-- **Grounded answers:** when a page found by search says "See Big Game Regulations" and links it, that page is read too (up to 2 such pages). An answer written from search results gets a **source check**: fees, dates, limits and legal claims the pages don't support are removed or marked unverified, and "not mentioned" is never treated as "not allowed". General know-how (steps, recipes, tips) is left alone. The check isn't streamed: the answer streams once, the reply shows "Checking the answer against its sources…", and the checked version replaces it when ready.
+- **Grounded answers:** when a page found by search says "See Big Game Regulations" and links it, that page is read too (up to 2 such pages). With **Check sources** ticked (off by default), an answer written from search results gets a **source check**: fees, dates, limits and legal claims the pages don't support are removed or marked unverified, and "not mentioned" is never treated as "not allowed". General know-how (steps, recipes, tips) is left alone. The check isn't streamed: the answer streams once, the reply shows "Checking the answer against its sources…", and the checked version replaces it when ready.
 - **Each reply** says whether it searched the web; the last one has **Search and answer again**, which rewrites it in place with search on.
 - **Agent pool** lets the planner split the reply across parallel agents; one agent answers by default, which is fastest. The Search and Agent pool choices are remembered in the browser.
 - **Each reply** links to its run ("View run") for the agents, timeline and timings.
@@ -61,6 +61,9 @@ The API serves a web console at `/`. It's embedded in the binary and needs no bu
   - a sidebar that updates live, with per-status progress bars for every run
 - **Agents & directives:** choose the model, temperature and max tokens for each role (planner, worker, reducer), edit each role's directive (system prompt), and set split depth and fan-out. Settings are versioned, so concurrent edits are detected. Each run snapshots the settings when it starts, so edits never change a run in progress.
 - **Models & capacity:** every model in the pool, with each worker's live limiter state per endpoint (slots in use, learned limit, baseline TTFT, ejected). Below that, **Discover** lists every model your backends offer. You can load or unload models on LM Studio hosts and **add any of them to the pool** with a routing name, concurrency limits and a reasoning setting ("off" sends `reasoning_effort: "none"`). Workers start serving new models within seconds, with no restart. Models from `backends.json` are read-only; console-added ones can be edited or removed.
+- **Benchmarking** (on the Models & capacity page):
+  - **Published scores** for candidate models that fit a 16 GB GPU (IFEval, IFBench, GPQA, MMLU-Pro, τ-bench; vendor self-reported, from llm-stats.com and the model cards, in `internal/ui/static/benchmarks.json`), with what your hosts already have installed and where to get the rest.
+  - **Replay a chat:** pick a previous chat (or write a new message, which is sent as a chat first) and up to 4 pool models. Every user message is replayed with its history and the exact sources its original reply had, so all models answer from the same pages and nothing is searched again. Each model answers at the chosen number of parallel streams (timed: median tok/s, total tok/s, TTFT), then a judge model scores every answer for **refusals**, **invented specifics** (fees, dates, limits or legal claims not in the sources) and **knowledge slips**, quoting each finding so you can check it. With **Swap models on the GPU**, each model is loaded on its LM Studio host before its turn and the original models are put back afterwards. One benchmark runs at a time; deleting one purges its runs.
 
 ### Authentication
 
@@ -139,6 +142,8 @@ parallelism the server allows.
 | POST / PUT / DELETE | `/v1/models[/{name}]` | Add, edit or remove console-managed models. Workers pick changes up within seconds. Delete is refused while the model is in use (by settings, a running tree, or queued jobs) |
 | GET / POST | `/v1/chats` | List your conversations / create one (`{"title"?}`) |
 | GET / PATCH / DELETE | `/v1/chats/{id}` | A conversation with its messages (a reply's text and status come from its run) / rename (`{"title"}`) / delete it and purge its runs |
+| GET / POST | `/v1/benchmarks` | List benchmarks / start one: `{"chat_id" or "message", "models": [...], "judge"?, "parallel"? (default 4), "swap"?}` |
+| GET / DELETE | `/v1/benchmarks/{id}` | Results so far / cancel a running benchmark, or delete a finished one and purge its runs |
 | POST | `/v1/chats/{id}/retry` | `{"search_mode"?, "deep"?, "model"?}` → like `messages`: writes the last reply again (in place; its old run is purged) |
 | POST | `/v1/chats/{id}/messages` | `{"content", "search_mode"? ("auto" default, "on", "off"), "fetch_urls"? (default true), "deep"?, "model"?}` (`"search": true` still means "on") → `{tree_id, events_url, user_message_id, assistant_message_id, history_note?, fetched?}`. Starts the reply's run with the conversation so far; stream it from `events_url`. 409 while the previous reply is still being written |
 | GET | `/v1/discovery[?url=]` | Models offered by each backend host (LM Studio: size, quantization, load state, parallel slots, reasoning options) |
@@ -181,6 +186,16 @@ claude mcp add --transport http spawner http://192.168.1.64:30880/mcp \
 ## Configuration
 
 What the agents do (role models, directives, temperature, depth, fan-out) is configured in the console or through `/v1/settings`. Settings are stored in Postgres; until someone saves, defaults come from `planner`/`default` and `MAX_DEPTH`/`MAX_CHILDREN`.
+
+To keep that configuration in git, export it to a file and import it back (through the API, with the token `spawner mcp` uses):
+
+```sh
+SPAWNER_URL=http://192.168.1.64:30880 spawner config export deploy/config/andor.json
+SPAWNER_URL=http://192.168.1.64:30880 spawner config import -dry-run deploy/config/andor.json  # show what would change
+SPAWNER_URL=http://192.168.1.64:30880 spawner config import deploy/config/andor.json
+```
+
+The file holds the saved settings and the console-added models (models in `backends.json` are already in git). Import adds or updates models first, then saves the settings if they differ.
 
 `backends.json` defines the models the pool can use:
 
