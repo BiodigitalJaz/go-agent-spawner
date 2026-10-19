@@ -75,6 +75,10 @@ type task struct {
 	node  *store.Node
 	set   *settings.Settings
 	merge struct{ passes, batches, truncated int }
+	// quiet keeps a generation's text off the live stream: the source
+	// check's rewrite replaces the answer once, when it is done, instead of
+	// streaming a second copy for the reader to read again.
+	quiet bool
 }
 
 func (t *task) event(typ events.Type, role Role) events.Event {
@@ -342,12 +346,13 @@ func (w *Worker) exec(ctx context.Context, t *task, lease *backend.Lease) error 
 // reducer model. The repeated node.started makes viewers replace the shown
 // answer with the checked one as it streams.
 func (w *Worker) checkAnswer(ctx context.Context, t *task, role Role, answer string) (string, error) {
-	return w.review(ctx, t, role, answer, checkMessages(t.set, t.node, answer), "Rules check: reviewing the answer against the reference material.\n")
+	return w.review(ctx, t, role, answer, checkMessages(t.set, t.node, answer), "Rules check: reviewing the answer against the reference material.\n", false)
 }
 
 // review rewrites a root's final answer with the reducer model (the rules
 // check and the source check).
-func (w *Worker) review(ctx context.Context, t *task, role Role, answer string, msgs []llm.Message, status string) (string, error) {
+// A quiet review is not streamed (see task.quiet).
+func (w *Worker) review(ctx context.Context, t *task, role Role, answer string, msgs []llm.Message, status string, quiet bool) (string, error) {
 	model := t.set.Reducer.Model
 	r := t.set.Reducer
 	if r.MaxTokens > 0 { // the checked answer is about as long as the answer
@@ -359,11 +364,15 @@ func (w *Worker) review(ctx context.Context, t *task, role Role, answer string, 
 	if err != nil {
 		return "", err
 	}
-	w.publish(ctx, t.event(events.NodeStarted, role))
+	if !quiet {
+		w.publish(ctx, t.event(events.NodeStarted, role)) // viewers replace the shown answer as the check streams
+	}
 	note := w.bus.Deltas(events.Thinking, t.node.TreeID, t.node.ID, w.cfg.DeltaInterval)
 	note.Write(status)
 	note.Close()
+	t.quiet = quiet
 	out, _, _, err := w.generateRetrying(ctx, t, role, model, r, msgs, lease)
+	t.quiet = false
 	if err != nil {
 		return "", err
 	}
@@ -383,7 +392,7 @@ const maxPressureRetries = 8
 // token ratio, so the retry reserves more and waits for real room.
 func (w *Worker) generateRetrying(ctx context.Context, t *task, role Role, model string, r settings.Role, msgs []llm.Message, lease *backend.Lease) (string, llm.Stats, *backend.Lease, error) {
 	for retry := 0; ; retry++ {
-		if retry > 0 {
+		if retry > 0 && !t.quiet {
 			w.publish(ctx, t.event(events.NodeStarted, role)) // a repeated start tells viewers to clear the partial text
 		}
 		out, stats, err := w.generate(ctx, t, lease, request(lease, r, msgs))
@@ -543,9 +552,11 @@ func (w *Worker) generate(ctx context.Context, t *task, lease *backend.Lease, re
 	content := w.bus.Deltas(events.Delta, t.node.TreeID, t.node.ID, w.cfg.DeltaInterval)
 	thinking := w.bus.Deltas(events.Thinking, t.node.TreeID, t.node.ID, w.cfg.DeltaInterval)
 	out, stats, err := lease.Endpoint.Client.Stream(ctx, req, func(kind llm.DeltaKind, text string) {
-		if kind == llm.Reasoning {
+		switch {
+		case t.quiet:
+		case kind == llm.Reasoning:
 			thinking.Write(text)
-		} else {
+		default:
 			content.Write(text)
 		}
 	})
@@ -588,7 +599,7 @@ func (w *Worker) complete(ctx context.Context, t *task, role Role, out string, l
 			out += "\n\n---\n_The rules check against the reference could not run (" + err.Error() + "), so this answer is unchecked._"
 		}
 	} else if t.node.ParentID == nil && lease != nil && t.set.SourceCheck && strings.Contains(t.set.Context, searchMarker) && strings.TrimSpace(out) != "" {
-		checked, err := w.review(ctx, t, role, out, sourceCheckMessages(t.set, t.node, out), "Source check: comparing the answer with the pages it came from.\n")
+		checked, err := w.review(ctx, t, role, out, sourceCheckMessages(t.set, t.node, out), "Checking the answer against its sources…\n", true)
 		switch {
 		case err == nil:
 			out, ev.SourceChecked = checked, true

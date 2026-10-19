@@ -1,6 +1,6 @@
 TEST_DATABASE_URL ?= postgres://postgres:dev@localhost:5432/spawner?sslmode=disable
 TEST_NATS_URL ?= nats://localhost:4222
-IMAGE ?= ghcr.io/biodigitaljaz/agent-spawner:0.1.51
+IMAGE ?= ghcr.io/biodigitaljaz/agent-spawner:0.1.52
 
 .PHONY: build test test-integration deps run image
 
