@@ -71,7 +71,7 @@ func withReference(set *settings.Settings, task string) string {
 	if strings.TrimSpace(set.Context) == "" {
 		return task
 	}
-	return "Reference material provided with this task. Use it as your source for what it covers; for anything it does not cover, use your own knowledge and say so. Never claim it says something it does not:\n" +
+	return "Reference material provided with this task. Use it as your source for what it covers; for anything it does not cover, use your own knowledge and say so. Never claim it says something it does not. Something it does not mention is not thereby forbidden: only call something prohibited when the reference says so in plain words:\n" +
 		"--- BEGIN REFERENCE ---\n" + set.Context + "\n--- END REFERENCE ---\n\n" + task
 }
 
@@ -168,6 +168,26 @@ func checkMessages(set *settings.Settings, node *store.Node, answer string) []ll
 	return []llm.Message{
 		{Role: "system", Content: checkDirective},
 		{Role: "user", Content: withReference(set, fmt.Sprintf("Original task:\n%s\n\nAnswer to check:\n--- BEGIN ANSWER ---\n%s\n--- END ANSWER ---", node.Prompt, answer))},
+	}
+}
+
+// sourceCheckDirective drives the review of an answer written from web
+// search results. Small models mixed sourced facts with invented ones (a
+// "$20 crossbow permit") and read a rule's absence as a ban.
+const sourceCheckDirective = `You review an answer against the web pages it was written from (the reference). Your job is to keep the answer helpful while removing what the pages do not support.
+
+Go through the answer and look at the facts that depend on place or time: fees, prices, dates, seasons, deadlines, limits, equipment rules, required licenses or permits, and statements that something is legal, illegal, required or not allowed.
+- If the reference states it, keep it.
+- If the reference does not state it, remove it, or keep it with "(unverified, not in the sources)" right after it when it is useful general knowledge.
+- If the answer says something is illegal, not allowed or not possible but the reference never says so in plain words, rewrite that part to give the practical help and say which rule to confirm and where (name the agency or page from the reference).
+- If the reference points to another page for a rule ("see Big Game Regulations") and that page is not in the reference, say the rule is on that page.
+
+Leave general know-how alone even when the reference does not cover it: techniques, steps, recipes, cooking times and temperatures, and tips stay as they are. Never remove such content. Do not add new facts, and keep the formatting, headings and source links. Respond with the reviewed answer only, with no notes about the review.`
+
+func sourceCheckMessages(set *settings.Settings, node *store.Node, answer string) []llm.Message {
+	return []llm.Message{
+		{Role: "system", Content: sourceCheckDirective},
+		{Role: "user", Content: withReference(set, fmt.Sprintf("Question:\n%s\n\nAnswer to review:\n--- BEGIN ANSWER ---\n%s\n--- END ANSWER ---", node.Prompt, answer))},
 	}
 }
 

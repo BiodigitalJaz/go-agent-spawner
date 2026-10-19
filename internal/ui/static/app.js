@@ -352,6 +352,24 @@ function buildComposer() {
     }
   }
 
+  // retry writes the last reply again with search on, in place.
+  async function retry(b) {
+    if (!current || send.disabled) return;
+    send.disabled = true;
+    try {
+      const res = await api("POST", `/v1/chats/${current}/retry`, { search_mode: "on", deep: deepBox.checked });
+      b.el.classList.remove("error");
+      b.text = "";
+      b.body.replaceChildren();
+      b.body.classList.remove("out", "md");
+      b.foot.replaceChildren();
+      follow(res.tree_id, b);
+    } catch (e) {
+      toast(e.message, true);
+      send.disabled = false;
+    }
+  }
+
   async function submit() {
     const text = prompt.value.trim();
     if (!text) { prompt.focus(); return; }
@@ -844,6 +862,7 @@ function treeView(root, id) {
           "merged via ", h("b", {}, st.merge_batches), ` batches / ${st.merge_passes} pass${st.merge_passes === 1 ? "" : "es"}`) : null,
         st?.truncated ? h("span", { class: "warn-text", title: "Inputs that alone exceeded the merge context were cut (marked in the text)" }, `⚠ ${st.truncated} truncated`) : null,
         st?.checked ? h("span", { title: "The final answer was checked against the reference material; see the Rules check section" }, "✓ rules-checked") : null,
+        st?.source_checked ? h("span", { title: "The answer was compared with the web pages it came from; unsupported specifics were removed or marked unverified" }, "✓ sources-checked") : null,
         st?.check_error ? h("span", { class: "warn-text", title: st.check_error }, "⚠ rules check failed") : null,
       ].filter(Boolean)));
 
@@ -1075,15 +1094,20 @@ function chatView(root, initialId) {
     thread.append(el);
     return { el, body, status, foot, text: "" };
   }
-  function showReply(b, m) {
+  // showReply renders a finished reply. The last one can be written again:
+  // with search when it was answered without (the model can misjudge
+  // whether a question needs current facts).
+  function showReply(b, m, last) {
+    b.el.classList.remove("error");
     if (m.status === "failed") { b.el.classList.add("error"); b.body.textContent = m.error || "The reply failed."; }
     else if (m.status === "cancelled") { b.body.textContent = m.content || ""; setText(b.status, "Stopped."); }
     else { b.body.replaceChildren(renderMarkdown(m.content || "")); b.body.classList.add("out", "md"); }
-    if (m.tree_id) {
-      b.foot.replaceChildren(
-        h("a", { href: `#/runs/${m.tree_id}`, class: "faint" }, "View run"),
-        h("button", { class: "link", onclick: () => navigator.clipboard?.writeText(m.content || "").then(() => toast("Copied")) }, "Copy"));
-    }
+    if (!m.tree_id) return;
+    const items = [h("a", { href: `#/runs/${m.tree_id}`, class: "faint" }, "View run"),
+      h("button", { class: "link", onclick: () => navigator.clipboard?.writeText(m.content || "").then(() => toast("Copied")) }, "Copy")];
+    if (m.status === "done" && app.searchEnabled) items.push(h("span", { class: "faint", title: m.searched ? "This reply used web search results" : "This reply was written without searching the web" }, m.searched ? "Searched the web" : "No web search"));
+    if (last && app.searchEnabled) items.push(h("button", { class: "link retry", onclick: () => retry(b) }, m.searched ? "Answer again" : "Search and answer again"));
+    b.foot.replaceChildren(...items);
   }
   function scrollDown() { thread.scrollTop = thread.scrollHeight; }
 
@@ -1102,12 +1126,12 @@ function chatView(root, initialId) {
     }
     if (destroyed || current !== id) return;
     title.textContent = d.chat.title || "New chat";
-    for (const m of d.messages) {
+    d.messages.forEach((m, i) => {
       const b = bubble(m.role);
-      if (m.role === "user") { b.body.textContent = m.content; continue; }
+      if (m.role === "user") { b.body.textContent = m.content; return; }
       if (m.status && !TERMINAL.has(m.status)) follow(m.tree_id, b);
-      else showReply(b, m);
-    }
+      else showReply(b, m, i === d.messages.length - 1);
+    });
     scrollDown();
     focusInput();
   }
@@ -1122,7 +1146,7 @@ function chatView(root, initialId) {
     setText(b.status, "Thinking…");
     const es = new EventSource(`/v1/trees/${tree}/events`);
     stream = { es, tree, b };
-    let agents = 0, finished = 0, phase = "";
+    let agents = 0, finished = 0, phase = "", searched = false;
     const root = (e) => e.node_id === tree;
     es.addEventListener("node.started", (m) => {
       const e = JSON.parse(m.data);
@@ -1134,6 +1158,7 @@ function chatView(root, initialId) {
     es.addEventListener("thinking", (m) => {
       const e = JSON.parse(m.data);
       if (!root(e)) return;
+      if (/Queries \(/.test(e.text || "")) searched = true;
       const line = (e.text || "").trim().split("\n").filter(Boolean).pop();
       if (line && /search|query|quer|read|check/i.test(line)) setText(b.status, line);
     });
@@ -1159,7 +1184,7 @@ function chatView(root, initialId) {
       let content = text;
       if (truncated) { try { content = (await api("GET", `/v1/trees/${tree}`)).nodes.find((n) => n.id === tree)?.output || text; } catch {} }
       setText(b.status, "");
-      showReply(b, { status, content, error: text, tree_id: tree });
+      showReply(b, { status, content, error: text, tree_id: tree, searched }, true);
       scrollDown();
       loadList();
     };
@@ -1191,6 +1216,7 @@ function chatView(root, initialId) {
       }
       const res = await api("POST", `/v1/chats/${id}/messages`, { content, search_mode: app.searchEnabled ? searchMode : "off", deep: deepBox.checked });
       input.value = "";
+      for (const r of thread.querySelectorAll(".retry")) r.remove(); // only the last reply can be written again
       const ub = bubble("user");
       ub.body.textContent = content;
       if (res.history_note) toast(res.history_note);

@@ -61,6 +61,9 @@ type Stats struct {
 	// tree's reference material; CheckError says why it could not.
 	Checked    bool   `json:"checked,omitempty"`
 	CheckError string `json:"check_error,omitempty"`
+	// SourceChecked: an answer written from web search results was reviewed
+	// against them (unsupported specifics removed or marked unverified).
+	SourceChecked bool `json:"source_checked,omitempty"`
 }
 
 type Event struct {

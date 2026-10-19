@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -122,5 +123,22 @@ func TestRejectsBadInput(t *testing.T) {
 	}))
 	if _, err := f.Fetch(context.Background(), bin); err == nil || !strings.Contains(err.Error(), "unsupported content type") {
 		t.Errorf("binary content should be rejected, got %v", err)
+	}
+}
+
+func TestHTMLRefs(t *testing.T) {
+	doc := `<html><body><nav><a href="/hunting/regs/big-game-regulations">Big Game Regulations</a></nav>
+<ul><li><strong>Archery</strong>: Equipment described as legal for big game. See<u> </u><a href="/hunting/regs/big-game-regulations" rel="nofollow"><u>Big Game Regulations</u></a>.</li>
+<li>Details: refer to the <a href="/regs/licenses#fees">license page</a> or <a href="https://other.example/x">another site</a>, see <a href="https://other.example/y">elsewhere</a>.</li>
+<li>Read <a href="/news">the news</a>.</li></ul></body></html>`
+	_, text, refs := htmlDoc(doc)
+	if !strings.Contains(text, "See Big Game Regulations") {
+		t.Fatalf("text = %q", text)
+	}
+	base, _ := url.Parse("https://www.wildlifedepartment.com/hunting/regs/fall-turkey")
+	got := resolveRefs(base, refs)
+	want := []string{"https://www.wildlifedepartment.com/hunting/regs/big-game-regulations", "https://www.wildlifedepartment.com/regs/licenses"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("refs = %v, want %v", got, want)
 	}
 }

@@ -1034,6 +1034,70 @@ func TestSearchAutoSkipsWhenNotNeeded(t *testing.T) {
 	}
 }
 
+// On "auto", a question about rules, prices, dates or places is searched
+// even when the model would not have; a page's "See ..." link is followed;
+// and the final answer gets the source check.
+func TestSearchAutoLookupFollowsReferences(t *testing.T) {
+	var site *httptest.Server
+	site = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		switch r.URL.Path {
+		case "/fall-turkey":
+			fmt.Fprint(w, `<title>Fall Turkey</title><nav><a href="/news">News</a></nav><ul><li>Archery: Equipment described as legal for big game. See <a href="/big-game">Big Game Regulations</a>.</li></ul>`)
+		case "/big-game":
+			fmt.Fprint(w, `<title>Big Game</title><p>Crossbows: minimum of 100 pounds draw weight.</p>`)
+		default:
+			fmt.Fprint(w, `<title>News</title><p>Unrelated news.</p>`)
+		}
+	}))
+	defer site.Close()
+	searx := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"results":[{"url":%q,"title":"Fall Turkey","content":"legal means"}]}`, site.URL+"/fall-turkey")
+	}))
+	defer searx.Close()
+	llm := &fakeLLM{searcher: fetch.NewMulti(slog.New(slog.NewTextHandler(io.Discard, nil)), fetch.NewSearcher(searx.URL, ""))}
+	h := setup(t, llm)
+	set := h.set
+	set.Search, set.SearchAuto, set.SourceCheck, set.AllowInternalFetch, set.MaxDepth, set.CheckAnswer = true, true, true, true, 0, false
+	started, err := agent.StartTree(context.Background(), h.db, h.client, agent.TreeRequest{
+		Prompt: "Can I hunt turkey with a crossbow in Oklahoma?", Priority: 1, Settings: set,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evs := h.collect(t, started.Root.TreeID)
+	last := evs[len(evs)-1]
+	if last.Type != events.TreeDone {
+		t.Fatalf("tree failed: %+v", last)
+	}
+	snap, _ := settings.ForTree(context.Background(), h.db, started.Root.TreeID)
+	for _, want := range []string{"=== WEB SEARCH RESULTS", "See Big Game Regulations", "Crossbows: minimum of 100 pounds", "refers to it"} {
+		if !strings.Contains(snap.Context, want) {
+			t.Fatalf("reference missing %q:\n%s", want, snap.Context)
+		}
+	}
+	if strings.Contains(snap.Context, "Unrelated news") {
+		t.Fatal("a navigation link was followed")
+	}
+	llm.mu.Lock()
+	defer llm.mu.Unlock()
+	auto, checked := false, false
+	for _, c := range llm.convs {
+		if len(c) > 0 && strings.Contains(c[0], "Decide first whether to search at all") {
+			auto = true
+		}
+		if len(c) > 0 && strings.Contains(c[0], "You review an answer against the web pages") {
+			checked = true
+		}
+	}
+	if auto {
+		t.Fatal("a question naming a state and a rule should be searched without asking the model")
+	}
+	if !checked {
+		t.Fatal("the answer was not source-checked")
+	}
+}
+
 func TestPurgeTreeRemovesEveryRecord(t *testing.T) {
 	h := setup(t, &fakeLLM{split: []string{"one", "two"}})
 	ctx := context.Background()

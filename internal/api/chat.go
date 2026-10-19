@@ -35,6 +35,7 @@ func (s *Server) chatRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /v1/chats/{id}", s.renameChat)
 	mux.HandleFunc("DELETE /v1/chats/{id}", s.deleteChat)
 	mux.HandleFunc("POST /v1/chats/{id}/messages", s.sendChatMessage)
+	mux.HandleFunc("POST /v1/chats/{id}/retry", s.retryChatMessage)
 }
 
 func chatID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
@@ -220,7 +221,26 @@ func (s *Server) sendChatMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	req := createRequest{Prompt: content, Model: body.Model, FetchURLs: body.FetchURLs == nil || *body.FetchURLs, softFetch: true}
+	resp, treeID, ok := s.startChatRun(w, r, body, content, msgs)
+	if !ok {
+		return
+	}
+	userID, assistantID, err := store.AddExchange(r.Context(), s.db, id, content, treeID, titleFrom(content))
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	resp["chat_id"] = c.ID
+	resp["user_message_id"] = userID
+	resp["assistant_message_id"] = assistantID
+	writeJSON(w, http.StatusCreated, resp)
+}
+
+// startChatRun starts the run that writes a reply to content, with the
+// conversation in msgs as its history. It has written the error response
+// when ok is false.
+func (s *Server) startChatRun(w http.ResponseWriter, r *http.Request, body chatMessageRequest, content string, msgs []store.ChatMessage) (map[string]any, uuid.UUID, bool) {
+	req := createRequest{Prompt: content, Model: body.Model, FetchURLs: body.FetchURLs == nil || *body.FetchURLs, softFetch: true, SourceCheck: true}
 	switch {
 	case body.Search || body.SearchMode == "on":
 		req.Search = s.SearchEnabled // forced; never an error in chat
@@ -229,7 +249,7 @@ func (s *Server) sendChatMessage(w http.ResponseWriter, r *http.Request) {
 	case body.SearchMode == "off":
 	default:
 		httpError(w, http.StatusBadRequest, `search_mode must be "auto", "on" or "off"`)
-		return
+		return nil, uuid.Nil, false
 	}
 	if !body.Deep {
 		zero := 0
@@ -245,19 +265,63 @@ func (s *Server) sendChatMessage(w http.ResponseWriter, r *http.Request) {
 	resp, treeID, err := s.startRun(r.Context(), req, history, r.RemoteAddr)
 	if err != nil {
 		s.writeRunError(w, err)
+		return nil, uuid.Nil, false
+	}
+	if dropped > 0 {
+		resp["history_note"] = fmt.Sprintf("the %d oldest messages were left out to fit the model's context", dropped)
+	}
+	return resp, treeID, true
+}
+
+// retryChatMessage writes the last reply again, typically with search on
+// ("Search and answer again"): the reply's message is pointed at a new run
+// and the old run is purged. The body is a message request without content.
+func (s *Server) retryChatMessage(w http.ResponseWriter, r *http.Request) {
+	id, ok := chatID(w, r)
+	if !ok {
 		return
 	}
-	userID, assistantID, err := store.AddExchange(r.Context(), s.db, id, content, treeID, titleFrom(content))
+	var body chatMessageRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
+		httpError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if _, err := store.GetConversation(r.Context(), s.db, id, auth.Principal(r.Context())); errors.Is(err, store.ErrNotFound) {
+		httpError(w, http.StatusNotFound, "chat not found")
+		return
+	} else if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	msgs, err := store.ChatMessages(r.Context(), s.db, id)
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	resp["chat_id"] = c.ID
-	resp["user_message_id"] = userID
-	resp["assistant_message_id"] = assistantID
-	if dropped > 0 {
-		resp["history_note"] = fmt.Sprintf("the %d oldest messages were left out to fit the model's context", dropped)
+	n := len(msgs)
+	if n < 2 || msgs[n-1].Role != "assistant" || msgs[n-2].Role != "user" {
+		httpError(w, http.StatusBadRequest, "there is no reply to write again")
+		return
 	}
+	if last := msgs[n-1]; last.Status != "" && !store.Status(last.Status).Terminal() {
+		httpError(w, http.StatusConflict, "the reply is still being written; wait for it or stop it")
+		return
+	}
+	resp, treeID, ok := s.startChatRun(w, r, body, msgs[n-2].Content, msgs[:n-2])
+	if !ok {
+		return
+	}
+	old, err := store.ReplaceReply(r.Context(), s.db, id, msgs[n-1].ID, treeID)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if old != nil && *old != treeID {
+		go func() { _ = s.purgeRun(context.WithoutCancel(r.Context()), *old) }()
+	}
+	resp["chat_id"] = id
+	resp["user_message_id"] = msgs[n-2].ID
+	resp["assistant_message_id"] = msgs[n-1].ID
 	writeJSON(w, http.StatusCreated, resp)
 }
 

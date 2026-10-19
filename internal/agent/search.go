@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,7 @@ const (
 	maxSearchQueries = 3
 	maxSearchResults = 8 // listed in the reference
 	maxSearchPages   = 4 // fetched and read in full
+	maxFollowPages   = 2 // pages a read page refers to ("See Big Game Regulations")
 	searchMarker     = "=== WEB SEARCH RESULTS"
 )
 
@@ -56,7 +58,18 @@ If the task is about specific pages that were already fetched (listed below the 
 // decides whether searching is worth it at all.
 const searchAutoRule = `
 
-Decide first whether to search at all, and say so in search_needed. Most questions need no search: set search_needed to false (and return no queries) for explanations, how-tos and techniques (cooking, smoking, butchering, repairs, crafts), tips, writing, code, recipes and opinions. Set it to true only when the answer depends on facts that are current, local or likely to have changed: laws and regulations, seasons, prices, schedules, specific products or businesses, recent events, or anything the user asks to look up.`
+Decide first whether to search at all, and say so in search_needed. Set search_needed to false (and return no queries) only for questions that are clearly general: explanations, how-tos and techniques (cooking, smoking, butchering, repairs, crafts), tips, writing, code, recipes and opinions. Set it to true when any part of the answer depends on facts that are current, local or likely to have changed: laws and regulations, seasons, licenses and permits, prices and fees, schedules, specific products or businesses, recent events, or anything the user asks to look up. If you are unsure, set it to true.`
+
+// lookupRE spots questions whose answers depend on rules, prices, dates or
+// places. On "auto" they are always searched: the small query writer
+// sometimes judged them general and answered from memory.
+var lookupRE = regexp.MustCompile(`(?i)\b(laws?|legal|illegal|regulations?|regs|statutes?|ordinances?|seasons?|licen[cs]es?|permits?|tags?|bag limits?|speed limits?|prices?|costs?|fees?|how much|taxe?s?|schedules?|opening hours|deadlines?|this year|next year|today|tonight|tomorrow|this week(end)?|currently|latest|right now|near me|recalls?|(19|20)\d\d|` + usStates + `)\b`)
+
+const usStates = `alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|virginia|washington|west virginia|wisconsin|wyoming`
+
+// needsLookup reports whether a message asks about rules, prices, dates or
+// places (see lookupRE).
+func needsLookup(prompt string) bool { return lookupRE.MatchString(prompt) }
 
 // search runs the root's web search: the planner model writes queries,
 // SearXNG returns results, the top pages are fetched (through the
@@ -88,15 +101,20 @@ func (w *Worker) search(ctx context.Context, t *task, lease *backend.Lease) (*ba
 	if len(linked) > 0 {
 		user += "\n\nPages from the task's links, already fetched:\n- " + strings.Join(linked, "\n- ")
 	}
+	// On auto, a question about rules, prices, dates or places is searched
+	// without asking the model; the rest it decides.
+	auto := t.set.SearchAuto && !needsLookup(t.node.Prompt)
 	directive := searchQueryDirective
-	if t.set.SearchAuto {
+	if auto {
 		directive += searchAutoRule
+	} else if t.set.SearchAuto {
+		note.Write("Searching: the question involves rules, prices, dates or places.\n")
 	}
 	req := request(lease, t.set.Planner, []llm.Message{
 		{Role: "system", Content: directive},
 		{Role: "user", Content: user},
 	})
-	req.JSONSchema = searchSchema(t.set.SearchAuto)
+	req.JSONSchema = searchSchema(auto)
 	stats, err := lease.Endpoint.Client.JSON(ctx, req, &q, nil)
 	lease.Done(stats, err)
 	switch {
@@ -104,7 +122,7 @@ func (w *Worker) search(ctx context.Context, t *task, lease *backend.Lease) (*ba
 		// The task's own pages are in hand: no search beats a noisy one.
 		note.Write("Search skipped: the pages linked in the task cover it.\n")
 		return w.reacquire(ctx, t)
-	case t.set.SearchAuto && (err != nil || len(q.Queries) == 0 || (q.SearchNeeded != nil && !*q.SearchNeeded)):
+	case auto && (err != nil || len(q.Queries) == 0 || (q.SearchNeeded != nil && !*q.SearchNeeded)):
 		note.Write("Search not needed for this question.\n")
 		return w.reacquire(ctx, t)
 	case err != nil || len(q.Queries) == 0:
@@ -181,14 +199,17 @@ func (w *Worker) search(ctx context.Context, t *task, lease *backend.Lease) (*ba
 		}()
 	}
 	wg.Wait()
-
-	reference := searchReference(q.Queries, results, pages, MaxReferenceChars(w.pool.ContextLength(t.set.Worker.Model))-len(t.set.Context))
-	read := 0
-	for _, p := range pages {
-		if p != nil {
-			read++
+	pages = compact(pages)
+	via := make([]string, len(pages))
+	read := len(pages)
+	if followed, from := w.followRefs(ctx, f, pages); len(followed) > 0 {
+		pages, via = append(pages, followed...), append(via, from...)
+		for i, p := range followed {
+			note.Write(fmt.Sprintf("Also read %s (referred to by %s).\n", p.URL, from[i]))
 		}
 	}
+
+	reference := searchReference(q.Queries, results, pages, via, MaxReferenceChars(w.pool.ContextLength(t.set.Worker.Model))-len(t.set.Context))
 	note.Write(fmt.Sprintf("Read %d of them in full.\n", read))
 	if t.set.Context != "" {
 		reference = t.set.Context + "\n\n" + reference
@@ -213,7 +234,7 @@ func (w *Worker) reacquire(ctx context.Context, t *task) (*backend.Lease, error)
 // searchReference formats search results for the reference material: the
 // fetched pages in full (sharing the room left), then every result's title,
 // address and snippet, so agents can cite sources.
-func searchReference(queries []string, results []fetch.SearchResult, pages []*fetch.Page, room int) string {
+func searchReference(queries []string, results []fetch.SearchResult, pages []*fetch.Page, via []string, room int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s (searched for: %s; background only, may be unrelated to any pages linked in the task) ===\n", searchMarker, strings.Join(queries, "; "))
 	if len(results) == 0 {
@@ -224,27 +245,98 @@ func searchReference(queries []string, results []fetch.SearchResult, pages []*fe
 	for i, r := range results {
 		fmt.Fprintf(&b, "%d. %s — %s — %s\n", i+1, r.Title, r.URL, r.Snippet)
 	}
-	read := 0
-	for _, p := range pages {
-		if p != nil {
-			read++
-		}
-	}
-	if read == 0 {
+	if len(pages) == 0 {
 		return b.String()
 	}
-	share := max((room-b.Len()-200)/read, 0)
-	for _, p := range pages {
-		if p == nil {
-			continue
-		}
+	share := max((room-b.Len()-200)/len(pages), 0)
+	for i, p := range pages {
 		text := p.Text
 		if len(text) > share {
 			text = strings.ToValidUTF8(text[:max(share-60, 0)], "") + "\n[page truncated]"
 		}
-		fmt.Fprintf(&b, "\n## Page: %s\nTitle: %s\n\n%s\n", p.URL, p.Title, text)
+		fmt.Fprintf(&b, "\n## Page: %s\nTitle: %s\n", p.URL, p.Title)
+		if i < len(via) && via[i] != "" {
+			fmt.Fprintf(&b, "(Read because %s refers to it; it spells out rules that page only summarizes.)\n", via[i])
+		}
+		fmt.Fprintf(&b, "\n%s\n", text)
 	}
 	return b.String()
+}
+
+// compact drops the pages that could not be read.
+func compact(pages []*fetch.Page) []*fetch.Page {
+	out := pages[:0]
+	for _, p := range pages {
+		if p != nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// seeTextRE finds a cross-reference in page text ("See Big Game
+// Regulations"), for pages whose text came from the search provider
+// without their links.
+var seeTextRE = regexp.MustCompile(`\b(See|see|Refer to|refer to)(\s+the)?\s+[A-Z][a-z]+`)
+
+// followRefs reads up to maxFollowPages pages that the read pages point to
+// with "See ...": a summary page often says "archery: equipment legal for
+// big game, see Big Game Regulations", and without that page the model took
+// the omission as a ban. It returns the pages and, for each, the page that
+// referred to it.
+func (w *Worker) followRefs(ctx context.Context, f *fetch.Fetcher, pages []*fetch.Page) ([]*fetch.Page, []string) {
+	have := map[string]bool{}
+	for _, p := range pages {
+		have[p.URL] = true
+	}
+	// Pages whose text came from the provider (Exa) carry no links: fetch
+	// them only when their text has a cross-reference.
+	var wg sync.WaitGroup
+	refs := make([][]string, len(pages))
+	for i, p := range pages {
+		refs[i] = p.Refs
+		if p.Refs != nil || !seeTextRE.MatchString(p.Text) {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if full, err := f.Fetch(ctx, p.URL); err == nil {
+				refs[i] = full.Refs
+			}
+		}()
+	}
+	wg.Wait()
+	var want, from []string
+	for i, rs := range refs {
+		for _, r := range rs {
+			if !have[r] && len(want) < maxFollowPages {
+				have[r] = true
+				want, from = append(want, r), append(from, pages[i].URL)
+			}
+		}
+	}
+	got := make([]*fetch.Page, len(want))
+	for i, u := range want {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if p, err := f.Fetch(ctx, u); err == nil && strings.TrimSpace(p.Text) != "" {
+				got[i] = p
+			} else if err != nil {
+				w.log.Info("referred page not fetched", "url", u, "err", err)
+			}
+		}()
+	}
+	wg.Wait()
+	var out []*fetch.Page
+	var outFrom []string
+	for i, p := range got {
+		if p != nil {
+			out, outFrom = append(out, p), append(outFrom, from[i])
+		}
+	}
+	return out, outFrom
 }
 
 // linkedPages lists the addresses of the pages fetched from the task's own
