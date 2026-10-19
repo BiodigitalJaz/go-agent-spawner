@@ -1,6 +1,7 @@
 package fetch
 
 import (
+	"regexp"
 	"strings"
 
 	"golang.org/x/net/html"
@@ -20,10 +21,23 @@ var blocks = map[string]bool{
 // HTMLText extracts a page's title and readable text, keeping headings and
 // list items recognizable (as Markdown-like "#" and "-").
 func HTMLText(doc string) (title, text string) {
+	title, text, _ = htmlDoc(doc)
+	return title, text
+}
+
+// seeRE matches text that introduces a cross-reference ("See", "refer to",
+// "described in"...), so the link after it points to where a rule continues.
+var seeRE = regexp.MustCompile(`(?i)\b(see|refer to|found in|described in|listed in|defined in|details in|per)(\s+the)?[\s:]*$`)
+
+// htmlDoc is HTMLText plus the page's cross-references: the links (as
+// written, not resolved) that follow "See ..." in the text. Navigation links
+// are not preceded by such words, so they are left out.
+func htmlDoc(doc string) (title, text string, refs []string) {
 	z := html.NewTokenizer(strings.NewReader(doc))
 	var b strings.Builder
-	skip := 0 // depth inside skipped elements
-	svg := 0  // depth inside <svg>: icons carry their own <title>
+	href, anchorAt := "", -1 // the open <a>'s address and where its text starts
+	skip := 0                // depth inside skipped elements
+	svg := 0                 // depth inside <svg>: icons carry their own <title>
 	inTitle, inPre := false, false
 	newline := func() {
 		if b.Len() > 0 && !strings.HasSuffix(b.String(), "\n") {
@@ -34,7 +48,7 @@ func HTMLText(doc string) (title, text string) {
 		tt := z.Next()
 		switch tt {
 		case html.ErrorToken:
-			return strings.TrimSpace(title), tidy(b.String())
+			return strings.TrimSpace(title), tidy(b.String()), refs
 		case html.StartTagToken, html.SelfClosingTagToken:
 			name, hasAttr := z.TagName()
 			tag := string(name)
@@ -65,6 +79,22 @@ func HTMLText(doc string) (title, text string) {
 				b.WriteString("- ")
 			case "pre":
 				inPre = true
+			case "a":
+				href, anchorAt = "", -1
+				for more := hasAttr; more; {
+					var k, v []byte
+					k, v, more = z.TagAttr()
+					if string(k) == "href" {
+						href = strings.TrimSpace(string(v))
+					}
+				}
+				if href != "" {
+					before := b.String()
+					before = before[max(len(before)-40, 0):]
+					if seeRE.MatchString(before) {
+						anchorAt = b.Len()
+					}
+				}
 			case "td", "th":
 				b.WriteString(" | ")
 			case "img":
@@ -80,6 +110,11 @@ func HTMLText(doc string) (title, text string) {
 			name, _ := z.TagName()
 			tag := string(name)
 			switch {
+			case tag == "a":
+				if anchorAt >= 0 && skip == 0 && strings.TrimSpace(b.String()[anchorAt:]) != "" {
+					refs = append(refs, href)
+				}
+				href, anchorAt = "", -1
 			case tag == "title":
 				inTitle = false
 			case skipped[tag]:

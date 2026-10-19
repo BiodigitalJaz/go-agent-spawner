@@ -342,8 +342,13 @@ func (w *Worker) exec(ctx context.Context, t *task, lease *backend.Lease) error 
 // reducer model. The repeated node.started makes viewers replace the shown
 // answer with the checked one as it streams.
 func (w *Worker) checkAnswer(ctx context.Context, t *task, role Role, answer string) (string, error) {
+	return w.review(ctx, t, role, answer, checkMessages(t.set, t.node, answer), "Rules check: reviewing the answer against the reference material.\n")
+}
+
+// review rewrites a root's final answer with the reducer model (the rules
+// check and the source check).
+func (w *Worker) review(ctx context.Context, t *task, role Role, answer string, msgs []llm.Message, status string) (string, error) {
 	model := t.set.Reducer.Model
-	msgs := checkMessages(t.set, t.node, answer)
 	r := t.set.Reducer
 	if r.MaxTokens > 0 { // the checked answer is about as long as the answer
 		r.MaxTokens = max(r.MaxTokens, estimateTokens(answer)+800)
@@ -356,7 +361,7 @@ func (w *Worker) checkAnswer(ctx context.Context, t *task, role Role, answer str
 	}
 	w.publish(ctx, t.event(events.NodeStarted, role))
 	note := w.bus.Deltas(events.Thinking, t.node.TreeID, t.node.ID, w.cfg.DeltaInterval)
-	note.Write("Rules check: reviewing the answer against the reference material.\n")
+	note.Write(status)
 	note.Close()
 	out, _, _, err := w.generateRetrying(ctx, t, role, model, r, msgs, lease)
 	if err != nil {
@@ -581,6 +586,17 @@ func (w *Worker) complete(ctx context.Context, t *task, role Role, out string, l
 			w.log.Warn("rules check failed; keeping the unchecked answer", "node", t.node.ID, "err", err)
 			ev.CheckError = err.Error()
 			out += "\n\n---\n_The rules check against the reference could not run (" + err.Error() + "), so this answer is unchecked._"
+		}
+	} else if t.node.ParentID == nil && lease != nil && t.set.SourceCheck && strings.Contains(t.set.Context, searchMarker) && strings.TrimSpace(out) != "" {
+		checked, err := w.review(ctx, t, role, out, sourceCheckMessages(t.set, t.node, out), "Source check: comparing the answer with the pages it came from.\n")
+		switch {
+		case err == nil:
+			out, ev.SourceChecked = checked, true
+		case ctx.Err() != nil:
+			return err
+		default:
+			// The unchecked answer is still useful: keep it.
+			w.log.Warn("source check failed; keeping the unchecked answer", "node", t.node.ID, "err", err)
 		}
 	}
 	var res *store.FinishResult

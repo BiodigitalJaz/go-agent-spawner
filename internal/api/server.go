@@ -113,6 +113,9 @@ type createRequest struct {
 	// SearchAuto searches only when the question needs current or local
 	// facts (the local model decides). Ignored without a search backend.
 	SearchAuto bool `json:"search_auto,omitempty"`
+	// SourceCheck reviews an answer written from search results against
+	// them (see settings.SourceCheck).
+	SourceCheck bool `json:"source_check,omitempty"`
 
 	// softFetch (chat): a link that cannot be fetched becomes a note for
 	// the agent instead of failing the request.
@@ -209,6 +212,7 @@ func (s *Server) startRun(ctx context.Context, req createRequest, history []sett
 	if strings.TrimSpace(req.Context) == "" {
 		set.CheckAnswer = false
 	}
+	set.SourceCheck = req.SourceCheck
 	if req.Search {
 		if !s.SearchEnabled {
 			return nil, uuid.Nil, badRequest("web search is not configured on this server (set SEARCH_URL or EXA_API_KEY)")

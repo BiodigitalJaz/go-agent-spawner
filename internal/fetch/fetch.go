@@ -38,6 +38,9 @@ type Page struct {
 	Title string
 	Text  string
 	Bytes int
+	// Refs are same-site pages the text points to with "See ...": where a
+	// rule the page only summarizes is spelled out.
+	Refs []string
 }
 
 type Fetcher struct {
@@ -158,7 +161,9 @@ func (f *Fetcher) Fetch(ctx context.Context, raw string) (*Page, error) {
 	p := &Page{URL: resp.Request.URL.String(), Bytes: len(body)}
 	switch {
 	case ct == "text/html" || ct == "application/xhtml+xml" || (ct == "" && looksHTML(body)):
-		p.Title, p.Text = HTMLText(string(body))
+		var refs []string
+		p.Title, p.Text, refs = htmlDoc(string(body))
+		p.Refs = resolveRefs(resp.Request.URL, refs)
 	case strings.HasPrefix(ct, "text/") || ct == "application/json" || ct == "application/xml" || strings.HasSuffix(ct, "+json") || strings.HasSuffix(ct, "+xml"):
 		p.Text = strings.TrimSpace(string(body))
 	default:
@@ -166,6 +171,28 @@ func (f *Fetcher) Fetch(ctx context.Context, raw string) (*Page, error) {
 	}
 	f.log.Info("fetched", "url", p.URL, "status", resp.StatusCode, "bytes", p.Bytes, "text_chars", len(p.Text), "ms", time.Since(start).Milliseconds())
 	return p, nil
+}
+
+// maxRefs bounds the cross-references kept per page.
+const maxRefs = 4
+
+// resolveRefs makes refs absolute and keeps distinct same-host web pages
+// other than the page itself.
+func resolveRefs(base *url.URL, refs []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, r := range refs {
+		u, err := base.Parse(r)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() != base.Hostname() {
+			continue
+		}
+		u.Fragment = ""
+		if s := u.String(); s != base.String() && !seen[s] && len(out) < maxRefs {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func looksHTML(b []byte) bool {

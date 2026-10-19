@@ -3,6 +3,10 @@
 ## Status: v0 and web console DEPLOYED to the andor cluster (2026-10-12), console on NodePort 30880
 
 
+## What works (verified 2026-10-18, 0.1.51): grounded chat answers
+- Crossbow/turkey prompt: no refusal (single and pool), crossbows legal in archery fall turkey with dates and specs from ODWC pages, no invented permit fee, full recipes. "See X" link followed. Retry endpoint replaces the reply and purges the old run (404). Phone footer: no overflow.
+- Known limit: the 9B model still slips on general knowledge it is not given (anatomy terms, part counts); grounding only covers place/time facts.
+
 ## What works (verified 2026-10-18, 0.1.49): chat search auto and mobile
 - Search auto, five live chat questions: three how-tos (smoking turkey legs, field dressing, crossbow triggers) searched nothing; two place/time questions (OK turkey season, TX license price) searched. With today's date given to the query writer, queries say 2026 (previously 2024) and the OK season answer cited wildlifedepartment.com.
 - Directive v9 retest of the turkey chat: practical steps, no invented prohibition, advice to confirm with ODWC.

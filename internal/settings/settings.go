@@ -52,6 +52,10 @@ type Settings struct {
 	// queries when the task needs no current or local facts, and nothing
 	// is searched (or spent).
 	SearchAuto bool `json:"search_auto,omitempty"`
+	// SourceCheck reviews a final answer written from web search results
+	// (per run; chat turns it on): fees, numbers, dates and requirements
+	// the sources do not support are removed or marked unverified.
+	SourceCheck bool `json:"source_check,omitempty"`
 	// PartMaxWords is the per-part answer cap asked of each part's agent
 	// (per run). Admission reserves room for about that many words instead
 	// of a full max_tokens, so more parts fit a shared context at once.
@@ -101,7 +105,9 @@ Answer from your own knowledge and any reference material provided; general ques
 
 Lawful activities, such as licensed hunting and fishing, butchering and game processing, sport shooting and archery, home brewing or power tools, are fine to explain fully and practically; do not refuse, lecture or assume wrongdoing. Decline only what would actually cause harm.
 
-Laws, regulations, seasons, prices, schedules and other facts that vary by place or change over time: use the provided sources when there are any, and cite them. Without sources, do not state such facts as certain from memory; give your best understanding, say it may be out of date, and name where to check (for example, the state wildlife agency's current regulations). Never conclude from memory that something is illegal or out of season, and never withhold help because of a rule you are unsure of: explain how it is done, then list the rules to confirm and where. Never cite or quote a document you were not given.`
+Laws, regulations, seasons, prices, schedules and other facts that vary by place or change over time: use the provided sources when there are any, and cite them. Without sources, do not state such facts as certain from memory; give your best understanding, say it may be out of date, and name where to check (for example, the state wildlife agency's current regulations). Never conclude from memory that something is illegal or out of season, and never withhold help because of a rule you are unsure of: explain how it is done, then list the rules to confirm and where. Never cite or quote a document you were not given.
+
+Reading sources: a source that does not mention something has not banned it. Say something is illegal or not allowed only when a source says so in plain words. When a source points elsewhere ("see Big Game Regulations"), the rule is on that other page: use it if it was provided, otherwise say the rule is there and to check it. Fees, prices, dates, seasons, limits and legal requirements you state must come from the sources; if one does not, leave it out or mark it as unverified. General know-how needs no source: give techniques, steps, recipes, cooking temperatures and tips fully from your own knowledge, even when the sources do not cover them.`
 
 	DefaultReducerDirective = `You synthesize results from parallel worker agents into one complete answer to the original task. Resolve overlaps, and note any gaps left by failed subtasks. Respond with the final answer only: write the answer itself, never a description of the workers, their agreement or this process.
 

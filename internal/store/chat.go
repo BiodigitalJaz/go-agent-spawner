@@ -28,6 +28,7 @@ type ChatMessage struct {
 	TreeID    *uuid.UUID `json:"tree_id,omitempty"`
 	Status    string     `json:"status,omitempty"` // the reply's tree status
 	Error     string     `json:"error,omitempty"`
+	Searched  bool       `json:"searched,omitempty"` // the reply's run searched the web
 	CreatedAt time.Time  `json:"created_at"`
 }
 
@@ -70,8 +71,9 @@ func GetConversation(ctx context.Context, db DBTX, id uuid.UUID, owner string) (
 }
 
 func ChatMessages(ctx context.Context, db DBTX, conversationID uuid.UUID) ([]ChatMessage, error) {
-	rows, err := db.Query(ctx, `SELECT m.id, m.role, m.content, m.tree_id, coalesce(n.status, ''), coalesce(n.output, ''), coalesce(n.error, ''), m.created_at
-		FROM chat_message m LEFT JOIN agent_node n ON n.id = m.tree_id
+	rows, err := db.Query(ctx, `SELECT m.id, m.role, m.content, m.tree_id, coalesce(n.status, ''), coalesce(n.output, ''), coalesce(n.error, ''),
+			coalesce(strpos(t.context, '=== WEB SEARCH RESULTS') > 0, false), m.created_at
+		FROM chat_message m LEFT JOIN agent_node n ON n.id = m.tree_id LEFT JOIN agent_tree t ON t.id = m.tree_id
 		WHERE m.conversation_id = $1 ORDER BY m.created_at, m.role DESC`, conversationID)
 	if err != nil {
 		return nil, err
@@ -81,7 +83,7 @@ func ChatMessages(ctx context.Context, db DBTX, conversationID uuid.UUID) ([]Cha
 	for rows.Next() {
 		var m ChatMessage
 		var output string
-		if err := rows.Scan(&m.ID, &m.Role, &m.Content, &m.TreeID, &m.Status, &output, &m.Error, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.Role, &m.Content, &m.TreeID, &m.Status, &output, &m.Error, &m.Searched, &m.CreatedAt); err != nil {
 			return nil, err
 		}
 		if m.Role == "assistant" && m.Content == "" {
@@ -109,6 +111,21 @@ func AddExchange(ctx context.Context, db DBTX, conversationID uuid.UUID, user st
 	_, err = db.Exec(ctx, `UPDATE chat_conversation SET updated_at = now(), title = CASE WHEN title = '' THEN $2 ELSE title END WHERE id = $1`,
 		conversationID, title)
 	return
+}
+
+// ReplaceReply points an assistant message at a new run (an "answer
+// again") and returns the run it replaced, for the caller to purge.
+func ReplaceReply(ctx context.Context, db DBTX, conversationID, messageID, treeID uuid.UUID) (old *uuid.UUID, err error) {
+	err = db.QueryRow(ctx, `UPDATE chat_message m SET tree_id = $3, content = ''
+		FROM chat_message prev WHERE m.id = $2 AND m.conversation_id = $1 AND m.role = 'assistant' AND prev.id = m.id
+		RETURNING prev.tree_id`, conversationID, messageID, treeID).Scan(&old)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err == nil {
+		_, err = db.Exec(ctx, `UPDATE chat_conversation SET updated_at = now() WHERE id = $1`, conversationID)
+	}
+	return old, err
 }
 
 func RenameConversation(ctx context.Context, db DBTX, id uuid.UUID, owner, title string) error {
