@@ -55,3 +55,15 @@ func TestDropSourced(t *testing.T) {
 		t.Fatal("without a reference nothing is dropped")
 	}
 }
+
+func TestCleanSlips(t *testing.T) {
+	ref := "Resident Hunting License $25. Batteries: 2,600 mAh."
+	kept, dropped := cleanSlips([]string{
+		"A Resident Hunting License costs $25.",                      // no correction
+		"Uses 2,600 mAh batteries -> they are 5,200 mAh",             // figure is in the reference
+		"new_stack = true sets the blur stack -> not a valid option", // a real slip
+	}, ref)
+	if dropped != 2 || len(kept) != 1 || kept[0][:9] != "new_stack" {
+		t.Fatalf("kept %v dropped %d", kept, dropped)
+	}
+}

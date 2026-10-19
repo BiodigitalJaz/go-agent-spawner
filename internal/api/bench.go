@@ -651,7 +651,9 @@ func (b *benchRun) answer(ctx context.Context, mi int, name string, cases []benc
 	if ok == 0 {
 		return errors.New("no answer finished: " + firstError(answers))
 	}
-	if peak := peakOverlap(answers); b.cfg.Parallel > 1 && peak < b.cfg.Parallel {
+	// Staggered starts and short answers keep the peak a little under the
+	// streams sent; only half or less means the backend is short of slots.
+	if peak := peakOverlap(answers); b.cfg.Parallel > 1 && peak*2 <= b.cfg.Parallel {
 		b.note("%s generated at most %d answer(s) at a time although %d were sent together: its backend has fewer parallel slots than that (set them in LM Studio's load settings, then the pool entry's slots). Its Total tok/s understates what it can do; compare tok/s per answer instead.", name, peak, b.cfg.Parallel)
 	}
 	return nil
@@ -686,6 +688,26 @@ func peakOverlap(as []benchAnswer) int {
 		peak = max(peak, cur)
 	}
 	return peak
+}
+
+// cleanSlips drops "slips" the judge gave no correction for (the
+// directive asks for "claim -> correction"; a bare quote is usually a
+// correct statement listed by mistake) and ones whose figures are all in
+// the reference.
+func cleanSlips(slips []string, reference string) (kept []string, dropped int) {
+	for _, s := range slips {
+		claim, fix, ok := strings.Cut(s, "->")
+		if !ok || strings.TrimSpace(fix) == "" {
+			dropped++
+			continue
+		}
+		if _, d := dropSourced([]string{claim}, reference); d > 0 {
+			dropped++
+			continue
+		}
+		kept = append(kept, s)
+	}
+	return kept, dropped
 }
 
 var numberRE = regexp.MustCompile(`\d[\d,.]*\d|\d`)
@@ -846,8 +868,9 @@ func (b *benchRun) judge(ctx context.Context, mi int, cases []benchCase) {
 				}
 				refused := g.Refused
 				kept, dropped := dropSourced(g.Unsupported, c.context)
-				ans.Refused, ans.Unsupported, ans.Slips, ans.JudgeDropped = &refused, kept, g.Slips, dropped
-				g.Unsupported = kept
+				slips, droppedSlips := cleanSlips(g.Slips, c.context)
+				ans.Refused, ans.Unsupported, ans.Slips, ans.JudgeDropped = &refused, kept, slips, dropped+droppedSlips
+				g.Unsupported, g.Slips = kept, slips
 				m.Judged++
 				if refused {
 					m.Refusals++
