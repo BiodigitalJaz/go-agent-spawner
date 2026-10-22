@@ -6,6 +6,15 @@ _Last updated: 2026-10-18_
 **Deployed and live** on the user's cluster: namespace `agent-spawner`, console at http://192.168.1.64:30880 (NodePort 30880 on any node). See deployment.md for every detail. Next steps depend on the user.
 
 ## Recent changes
+### 2026-10-21: chat documents (0.1.64, branch `feat/chat-documents`)
+- `internal/extract`: text/code (UTF-8, no NUL), HTML (fetch.HTMLText), .docx/.pptx (zip XML: paragraphs + runs; slides by number; 64 MB unzip cap), PDF via `github.com/ledongthuc/pdf` pinned at v0.0.0-20240201131950-da5b75280b06 (go get @latest resolved a 1-day-old pseudo-version; pinned the established Feb 2024 one), page by page with `## Page N`, panics recovered; empty text layer → "scanned? OCR first". Refused with advice: images/binaries, .doc/.ppt, spreadsheets (export CSV).
+- Migration 012 `chat_document` (conversation-scoped, cascade on chat delete). API: POST /v1/chats/{id}/documents (multipart `files`, per-file errors), DELETE …/documents/{doc}, GET chat includes `documents` (no text). Limits: 10 docs/chat, 20 MB/file, 64 MB/upload, 1M chars/doc, 2M chars/chat.
+- `useDocuments` in startChatRun: total ≤ min(worker chunk_tokens×4 chars (else 24k), MaxReferenceChars/2) → "whole": `=== DOCUMENTS ATTACHED BY THE USER` section first in the reference (search query writer lists them via `attachedDocuments` and skips search when they cover it); else "parts": one part per doc, MaxPartTokens = chunk_tokens×4/3, merge llm, no search, `TreeRequest.PartNote` (answer from this item, cite, or "Nothing relevant in this part"; + last 2 exchanges). Response `documents: {count, mode}`.
+- Root exec system prompt gets "continuing conversation: reply to the latest message only" when history exists (Gemma repeated its previous answer in follow-ups).
+- UI: Attach button + hidden file input, drop on the chat (`.dropping` outline), documents bar with chips (name, ~tokens, ×), `api()` accepts FormData.
+- Verified live: md+docx+pdf uploaded (jpg refused); questions answered from all three without search; follow-ups use them; 244k-char file → 13 parts, 30/30 facts, 54 s.
+- Local test DB/NATS containers (`spawner-test-pg`, `spawner-test-nats`) stop on reboot: `docker start` them before `go test` (a `;`-chained test+deploy command deployed 0.1.62 while every DB test failed to connect; re-ran green afterwards).
+
 ### 2026-10-19: per-model safe chunk size (0.1.61, branch `feat/model-chunk-size`)
 - `backend.ModelConfig.ChunkTokens` (`chunk_tokens`, migration 011 on agent_model; registry, modelRequest, modelView, config export, model form field "Safe chunk size", pool card). `agent.AutoChunks(doc, chunkTokens)` = max(default rule, ceil(t/chunkTokens)), capped at `agent.MaxChunks` (64); fitToModel gets the worker model's value from the registry and the sizing note names it; `/v1/trees` responses include `chunks` for documents.
 - MCP `run_task` now sends chunks 0 (the server decides, since it knows the model) and reports the server's count (`CreateTree` returns it).

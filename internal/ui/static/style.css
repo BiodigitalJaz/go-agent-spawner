@@ -576,3 +576,14 @@ details.thinking.live summary .lbl::after { content: "…"; animation: pulse 1.2
 .bench-col-head { margin-bottom: 6px; }
 .bench-col .bench-out { max-height: 520px; }
 @media (max-width: 900px) { .bench-side { grid-template-columns: minmax(0, 1fr); } }
+
+/* ---- chat documents ---- */
+.chat-docs { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12.5px; }
+.doc-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 4px 3px 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--panel-2); }
+.doc-chip .doc-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.doc-x { border: none; background: none; color: var(--muted); cursor: pointer; font-size: 15px; line-height: 1; padding: 2px 6px; border-radius: 999px; }
+.doc-x:hover { color: var(--c-failed); background: color-mix(in srgb, var(--c-failed) 10%, transparent); }
+.chat-main.dropping { outline: 2px dashed var(--accent); outline-offset: -6px; }
+@media (max-width: 900px), (pointer: coarse) {
+  .doc-x { min-width: 32px; min-height: 32px; }
+}

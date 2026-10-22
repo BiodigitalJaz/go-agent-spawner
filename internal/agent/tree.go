@@ -36,6 +36,9 @@ type TreeRequest struct {
 	// Context is reference material sent to every agent in the tree (a
 	// fetched page, rules to respect). Stored once with the tree.
 	Context string
+	// PartNote is appended to every part's prompt (not the root's): how to
+	// answer from one part, e.g. a chat question over attached documents.
+	PartNote string
 	// History is the conversation before Prompt (chat), oldest first.
 	History []settings.Turn
 	// PartMaxWords, when > 0, asks each part's agent for an answer under
@@ -119,6 +122,9 @@ func startChunked(ctx context.Context, db *pgxpool.Pool, client *river.Client[pg
 		prompt := partPrompt(req.Prompt, part, i+1, len(parts))
 		if chunked {
 			prompt = documentPrompt(req.Prompt, part.Text, i+1, len(parts))
+		}
+		if req.PartNote != "" {
+			prompt += "\n\n" + req.PartNote
 		}
 		if req.PartMaxWords > 0 {
 			// After the input, so a long part does not bury it.

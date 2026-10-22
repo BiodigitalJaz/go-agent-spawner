@@ -26,10 +26,11 @@ function h(tag, props = {}, ...kids) {
 }
 
 async function api(method, path, body) {
+  const form = body instanceof FormData; // uploads: the browser sets the multipart boundary
   const res = await fetch(path, {
     method,
-    headers: body ? { "Content-Type": "application/json" } : {},
-    body: body ? JSON.stringify(body) : undefined,
+    headers: body && !form ? { "Content-Type": "application/json" } : {},
+    body: form ? body : body ? JSON.stringify(body) : undefined,
   });
   if (res.status === 401 && path !== "/v1/login") {
     showLogin("Your session has ended. Sign in again.");
@@ -1078,14 +1079,20 @@ function chatView(root, initialId) {
     onchange: (e) => savePref("check", e.target.checked ? "1" : "0") });
   const checkLabel = h("label", { class: "check", hidden: !app.searchEnabled,
     title: "After a reply written from web search, compare it with the pages: unsupported fees, dates and rules are removed or marked unverified. The answer is replaced when the check finishes." }, checkBox, " Check sources");
+  // Documents belong to the conversation: every message can use them.
+  const fileIn = h("input", { type: "file", multiple: true, hidden: true, onchange: () => { upload([...fileIn.files]); fileIn.value = ""; } });
+  const attachBtn = h("button", { type: "button", class: "btn", title: "Attach documents (text, Markdown, CSV, code, HTML, PDF, Word, PowerPoint). You can also drop files on the chat.", onclick: () => fileIn.click() }, "Attach");
+  const docsBar = h("div", { class: "chat-docs", hidden: true });
+  let docs = [];
   const send = h("button", { class: "btn primary", onclick: () => submit() }, "Send");
   const stop = h("button", { class: "btn danger", hidden: true, onclick: () => stopReply() }, "Stop");
   const title = h("h2", { class: "chat-title" });
   const del = h("button", { class: "btn small danger", title: "Delete this conversation and its runs", onclick: () => deleteChat() }, "Delete");
   const head = h("div", { class: "chat-head" }, title, del);
   input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit(); } });
-  main.append(head, thread, h("div", { class: "chat-compose" }, input,
+  main.append(head, thread, h("div", { class: "chat-compose" }, docsBar, input,
     h("div", { class: "chat-opts" },
+      attachBtn, fileIn,
       searchCtl,
       h("label", { class: "check", title: "Split the reply across parallel agents: slower, for big requests (long reports, many parts)" }, deepBox, " Agent pool"),
       checkLabel,
@@ -1123,6 +1130,7 @@ function chatView(root, initialId) {
     thread.replaceChildren();
     title.textContent = "New chat";
     del.hidden = !id;
+    renderDocs([]);
     if (!id) { focusInput(); return; }
     let d;
     try { d = await api("GET", `/v1/chats/${id}`); } catch (e) {
@@ -1131,6 +1139,7 @@ function chatView(root, initialId) {
     }
     if (destroyed || current !== id) return;
     title.textContent = d.chat.title || "New chat";
+    renderDocs(d.documents || []);
     d.messages.forEach((m, i) => {
       const b = bubble(m.role);
       if (m.role === "user") { b.body.textContent = m.content; return; }
@@ -1207,18 +1216,74 @@ function chatView(root, initialId) {
     try { await api("DELETE", `/v1/trees/${stream.tree}`); } catch (e) { toast(e.message, true); }
   }
 
+  // ensureChat creates the conversation on first use (a message or an upload).
+  async function ensureChat() {
+    if (current) return current;
+    const id = (await api("POST", "/v1/chats", {})).id;
+    current = id;
+    history.replaceState(null, "", `#/chat/${id}`); // no re-render: stay in this thread
+    del.hidden = false;
+    return id;
+  }
+
+  // ---- documents ----
+  const tokensOf = (chars) => (chars >= 4000 ? `~${Math.round(chars / 4000)}k tokens` : `~${Math.max(1, Math.round(chars / 4))} tokens`);
+  function renderDocs(list, uploading = 0) {
+    docs = list;
+    docsBar.hidden = !docs.length && !uploading;
+    docsBar.replaceChildren(...[
+      h("span", { class: "faint", title: "Every message in this chat can use these documents" }, "Documents:"),
+      ...docs.map((d) => h("span", { class: "doc-chip", title: `${d.name} · ${d.kind} · ${d.chars.toLocaleString()} characters` },
+        h("span", { class: "doc-name" }, d.name), h("span", { class: "faint" }, tokensOf(d.chars)),
+        h("button", { class: "doc-x", title: `Remove ${d.name} from this chat`, "aria-label": `Remove ${d.name}`, onclick: () => removeDoc(d) }, "×"))),
+      uploading ? h("span", { class: "doc-chip faint" }, `Reading ${uploading} file${uploading > 1 ? "s" : ""}…`) : null,
+    ].filter(Boolean));
+  }
+  async function upload(files) {
+    if (!files.length) return;
+    renderDocs(docs, files.length);
+    try {
+      const id = await ensureChat();
+      const fd = new FormData();
+      for (const f of files) fd.append("files", f, f.name);
+      const res = await api("POST", `/v1/chats/${id}/documents`, fd);
+      const added = res.documents || [], failed = res.errors || [];
+      renderDocs([...docs, ...added]);
+      if (added.length && title.textContent === "New chat") title.textContent = added[0].name;
+      // One message, so a refusal is not hidden behind the confirmation.
+      const parts = [];
+      if (added.length) parts.push(`Added ${added.map((d) => d.name).join(", ")}.`);
+      for (const e of failed) parts.push(`Couldn't use ${e.name}: ${e.error}.`);
+      if (parts.length) toast(parts.join(" "), failed.length > 0);
+      loadList();
+      focusInput();
+    } catch (e) {
+      renderDocs(docs);
+      toast(e.message, true);
+    }
+  }
+  async function removeDoc(d) {
+    try {
+      await api("DELETE", `/v1/chats/${current}/documents/${d.id}`);
+      renderDocs(docs.filter((x) => x.id !== d.id));
+    } catch (e) { toast(e.message, true); }
+  }
+  // Drop files anywhere on the conversation.
+  main.addEventListener("dragover", (e) => { if ([...(e.dataTransfer?.types || [])].includes("Files")) { e.preventDefault(); main.classList.add("dropping"); } });
+  main.addEventListener("dragleave", (e) => { if (!main.contains(e.relatedTarget)) main.classList.remove("dropping"); });
+  main.addEventListener("drop", (e) => {
+    if (!e.dataTransfer?.files?.length) return;
+    e.preventDefault();
+    main.classList.remove("dropping");
+    upload([...e.dataTransfer.files]);
+  });
+
   async function submit() {
     const content = input.value.trim();
     if (!content || send.disabled) return;
     send.disabled = true;
     try {
-      let id = current;
-      if (!id) {
-        id = (await api("POST", "/v1/chats", {})).id;
-        current = id;
-        history.replaceState(null, "", `#/chat/${id}`); // no re-render: stay in this thread
-        del.hidden = false;
-      }
+      const id = await ensureChat();
       const res = await api("POST", `/v1/chats/${id}/messages`, { content, search_mode: app.searchEnabled ? searchMode : "off", deep: deepBox.checked, source_check: checkBox.checked });
       input.value = "";
       for (const r of thread.querySelectorAll(".retry")) r.remove(); // only the last reply can be written again
@@ -1231,6 +1296,7 @@ function chatView(root, initialId) {
       const ab = bubble("assistant");
       scrollDown();
       follow(res.tree_id, ab);
+      if (res.documents?.mode === "parts") setText(ab.status, `Reading ${res.documents.count} document${res.documents.count > 1 ? "s" : ""} in parts…`);
       loadList();
     } catch (e) {
       toast(e.message, true);

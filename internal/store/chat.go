@@ -160,3 +160,56 @@ func DeleteConversation(ctx context.Context, db DBTX, id uuid.UUID, owner string
 	}
 	return trees, err
 }
+
+// ChatDocument is a file uploaded to a conversation, as extracted text.
+// Text is only loaded for runs (ChatDocuments with text).
+type ChatDocument struct {
+	ID        uuid.UUID `json:"id"`
+	Name      string    `json:"name"`
+	Kind      string    `json:"kind"`
+	Chars     int       `json:"chars"`
+	Text      string    `json:"-"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func AddChatDocument(ctx context.Context, db DBTX, conversationID uuid.UUID, name, kind, text string) (*ChatDocument, error) {
+	d := &ChatDocument{ID: uuid.New(), Name: name, Kind: kind, Chars: len(text)}
+	err := db.QueryRow(ctx, `INSERT INTO chat_document (id, conversation_id, name, kind, content, chars) VALUES ($1, $2, $3, $4, $5, $6) RETURNING created_at`,
+		d.ID, conversationID, name, kind, text, len(text)).Scan(&d.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	_, err = db.Exec(ctx, `UPDATE chat_conversation SET updated_at = now(), title = CASE WHEN title = '' THEN $2 ELSE title END WHERE id = $1`, conversationID, name)
+	return d, err
+}
+
+// ChatDocuments lists a conversation's documents, oldest first, with their
+// text when withText is set.
+func ChatDocuments(ctx context.Context, db DBTX, conversationID uuid.UUID, withText bool) ([]ChatDocument, error) {
+	col := "''"
+	if withText {
+		col = "content"
+	}
+	rows, err := db.Query(ctx, `SELECT id, name, kind, chars, `+col+`, created_at FROM chat_document WHERE conversation_id = $1 ORDER BY created_at`, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ChatDocument{}
+	for rows.Next() {
+		var d ChatDocument
+		if err := rows.Scan(&d.ID, &d.Name, &d.Kind, &d.Chars, &d.Text, &d.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+func DeleteChatDocument(ctx context.Context, db DBTX, conversationID, id uuid.UUID) error {
+	tag, err := db.Exec(ctx, `DELETE FROM chat_document WHERE id = $1 AND conversation_id = $2`, id, conversationID)
+	if err == nil && tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return err
+}

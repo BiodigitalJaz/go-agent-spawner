@@ -11,6 +11,7 @@ import (
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/agent"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/fetch"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/settings"
+	"github.com/BiodigitalJaz/go-agent-spawner/internal/store"
 )
 
 // linkedPagesMarker heads the pages fetched from the task's own links; the
@@ -60,16 +61,25 @@ func (s *Server) reference(ctx context.Context, req *createRequest, set settings
 		return "", nil, &requestError{http.StatusBadRequest, fmt.Sprintf(
 			"context is %d characters; the limit for this model is %d (40%% of its context) because every agent receives it. Send large material as document or parts", len(userCtx), maxChars)}
 	}
+	// The user's documents come first: the conversation is about them.
+	docs := documentsSection(req.documents)
+	withDocs := func(rest string) string {
+		if docs == "" {
+			return rest
+		}
+		return strings.TrimSpace(docs + "\n\n" + rest)
+	}
+	maxChars -= len(docs)
 	urls := promptURLs(req.Prompt)
 	if len(urls) == 0 {
-		return userCtx, nil, nil
+		return withDocs(userCtx), nil, nil
 	}
 	if !req.FetchURLs {
 		if userCtx == "" && req.Document == "" && len(req.Parts) == 0 && !req.Search {
 			return "", nil, &requestError{http.StatusBadRequest, fmt.Sprintf(
 				"the prompt links to %s, but agents cannot open web pages. Turn on fetch_urls (\"Fetch linked pages\" in the console) or pass the content as context or document", urls[0])}
 		}
-		return userCtx, nil, nil
+		return withDocs(userCtx), nil, nil
 	}
 	if len(urls) > fetch.MaxURLs {
 		return "", nil, &requestError{http.StatusBadRequest, fmt.Sprintf("the prompt links to %d pages; at most %d can be fetched per run", len(urls), fetch.MaxURLs)}
@@ -148,7 +158,20 @@ func (s *Server) reference(ctx context.Context, req *createRequest, set settings
 		b.WriteString("=== GUIDELINES AND FACTS TO RESPECT (supplied with the task) ===\n\n")
 		b.WriteString(userCtx)
 	}
-	return strings.TrimSpace(b.String()), report, nil
+	return withDocs(strings.TrimSpace(b.String())), report, nil
+}
+
+// documentsSection formats documents the user attached for the reference.
+func documentsSection(docs []store.ChatDocument) string {
+	if len(docs) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(agent.DocumentsMarker + " (uploaded to this conversation; the user's questions are usually about these) ===\n")
+	for _, d := range docs {
+		fmt.Fprintf(&b, "\n## Document: %s\n\n%s\n", d.Name, d.Text)
+	}
+	return b.String()
 }
 
 // fitToModel makes sure each agent's request fits the worker model's
