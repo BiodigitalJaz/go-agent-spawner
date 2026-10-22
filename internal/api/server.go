@@ -121,6 +121,11 @@ type createRequest struct {
 	// softFetch (chat): a link that cannot be fetched becomes a note for
 	// the agent instead of failing the request.
 	softFetch bool
+	// documents (chat uploads small enough to read whole) go into the
+	// reference material, labelled as the user's documents.
+	documents []store.ChatDocument
+	// partNote is appended to every part's prompt (agent.TreeRequest).
+	partNote string
 }
 
 func (s *Server) createTree(w http.ResponseWriter, r *http.Request) {
@@ -229,7 +234,7 @@ func (s *Server) startRun(ctx context.Context, req createRequest, history []sett
 
 	started, err := agent.StartTree(ctx, s.db, s.river, agent.TreeRequest{
 		Prompt: req.Prompt, Priority: req.Priority, Settings: set, Document: req.Document, Chunks: req.Chunks, Parts: req.Parts,
-		MaxPartTokens: req.MaxPartTokens, PartMaxWords: req.PartMaxWords, Context: reference, History: history,
+		MaxPartTokens: req.MaxPartTokens, PartMaxWords: req.PartMaxWords, Context: reference, History: history, PartNote: req.partNote,
 	})
 	if errors.Is(err, agent.ErrTooManyParts) {
 		return nil, uuid.Nil, badRequest("%s", err.Error())

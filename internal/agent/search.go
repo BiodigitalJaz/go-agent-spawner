@@ -20,6 +20,10 @@ import (
 // from the task's own links.
 const LinkedPagesMarker = "=== PAGES LINKED IN THE TASK"
 
+// DocumentsMarker heads the reference section holding documents the user
+// attached (chat uploads).
+const DocumentsMarker = "=== DOCUMENTS ATTACHED BY THE USER"
+
 const (
 	maxSearchQueries = 3
 	maxSearchResults = 8 // listed in the reference
@@ -52,7 +56,7 @@ func searchSchema(auto bool) *llm.Schema {
 
 const searchQueryDirective = `You write web search queries. Given a task, return up to 3 short keyword queries (3 to 8 words each) that would find pages with the information the task needs. Use the words such pages would contain, not the task's instructions. Do not answer the task.
 
-If the task is about specific pages that were already fetched (listed below the task) and they are enough on their own (for example, summarizing or reviewing one page), return an empty list: searching would only add unrelated pages. Search only for information those pages do not contain.`
+If the task is about specific pages or documents that were already provided (listed below the task) and they are enough on their own (for example, summarizing, reviewing or answering questions about them), return an empty list: searching would only add unrelated pages. Search only for information they do not contain.`
 
 // searchAutoRule is added when search is on "auto": the query writer also
 // decides whether searching is worth it at all.
@@ -94,12 +98,12 @@ func (w *Worker) search(ctx context.Context, t *task, lease *backend.Lease) (*ba
 		SearchNeeded *bool    `json:"search_needed"`
 		Queries      []string `json:"queries"`
 	}
-	linked := linkedPages(t.set.Context)
+	linked := append(linkedPages(t.set.Context), attachedDocuments(t.set.Context)...)
 	// The date keeps "this year" and "right now" queries from naming the
 	// model's training year.
 	user := "Today's date: " + time.Now().Format("January 2, 2006") + "\n\nTask:\n" + conversationBlock(t.set, t.node) + t.node.Prompt
 	if len(linked) > 0 {
-		user += "\n\nPages from the task's links, already fetched:\n- " + strings.Join(linked, "\n- ")
+		user += "\n\nPages and documents already provided with the task:\n- " + strings.Join(linked, "\n- ")
 	}
 	// On auto, a question about rules, prices, dates or places is searched
 	// without asking the model; the rest it decides.
@@ -120,7 +124,7 @@ func (w *Worker) search(ctx context.Context, t *task, lease *backend.Lease) (*ba
 	switch {
 	case len(linked) > 0 && (err != nil || len(q.Queries) == 0):
 		// The task's own pages are in hand: no search beats a noisy one.
-		note.Write("Search skipped: the pages linked in the task cover it.\n")
+		note.Write("Search skipped: the pages or documents provided cover it.\n")
 		return w.reacquire(ctx, t)
 	case auto && (err != nil || len(q.Queries) == 0 || (q.SearchNeeded != nil && !*q.SearchNeeded)):
 		note.Write("Search not needed for this question.\n")
@@ -337,6 +341,26 @@ func (w *Worker) followRefs(ctx context.Context, f *fetch.Fetcher, pages []*fetc
 		}
 	}
 	return out, outFrom
+}
+
+// attachedDocuments lists the documents the user attached, from the
+// reference's documents section.
+func attachedDocuments(reference string) []string {
+	i := strings.Index(reference, DocumentsMarker)
+	if i < 0 {
+		return nil
+	}
+	section := reference[i:]
+	if j := strings.Index(section[len(DocumentsMarker):], "\n=== "); j >= 0 {
+		section = section[:len(DocumentsMarker)+j]
+	}
+	var out []string
+	for _, line := range strings.Split(section, "\n") {
+		if name, ok := strings.CutPrefix(line, "## Document: "); ok {
+			out = append(out, "document: "+strings.TrimSpace(name))
+		}
+	}
+	return out
 }
 
 // linkedPages lists the addresses of the pages fetched from the task's own

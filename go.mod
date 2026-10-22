@@ -5,6 +5,7 @@ go 1.27.2
 require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.11.0
+	github.com/ledongthuc/pdf v0.0.0-20240201131950-da5b75280b06
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/nats-io/nats.go v1.48.0
 	github.com/riverqueue/river v0.49.0

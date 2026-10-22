@@ -110,7 +110,13 @@ func planMessages(set *settings.Settings, node *store.Node, canNest bool) []llm.
 // execMessages gives a chat reply's root agent the earlier conversation as
 // real turns, then the latest message.
 func execMessages(set *settings.Settings, node *store.Node) []llm.Message {
-	msgs := []llm.Message{{Role: "system", Content: set.Worker.Directive}}
+	system := set.Worker.Directive
+	if node.ParentID == nil && len(set.History) > 0 {
+		// Gemma 4 repeated its previous answer before answering a follow-up
+		// when the reference came with the latest message.
+		system += "\n\nThis is a continuing conversation. Reply to the latest message only; do not repeat or summarize your earlier answers unless asked."
+	}
+	msgs := []llm.Message{{Role: "system", Content: system}}
 	if node.ParentID == nil {
 		for _, t := range set.History {
 			role := "user"

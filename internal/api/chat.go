@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/agent"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/auth"
+	"github.com/BiodigitalJaz/go-agent-spawner/internal/extract"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/settings"
 	"github.com/BiodigitalJaz/go-agent-spawner/internal/store"
 )
@@ -36,6 +39,8 @@ func (s *Server) chatRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /v1/chats/{id}", s.deleteChat)
 	mux.HandleFunc("POST /v1/chats/{id}/messages", s.sendChatMessage)
 	mux.HandleFunc("POST /v1/chats/{id}/retry", s.retryChatMessage)
+	mux.HandleFunc("POST /v1/chats/{id}/documents", s.uploadChatDocuments)
+	mux.HandleFunc("DELETE /v1/chats/{id}/documents/{doc}", s.deleteChatDocument)
 }
 
 func chatID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
@@ -88,7 +93,12 @@ func (s *Server) getChat(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"chat": c, "messages": msgs})
+	docs, err := store.ChatDocuments(r.Context(), s.db, id, false)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"chat": c, "messages": msgs, "documents": docs})
 }
 
 func (s *Server) renameChat(w http.ResponseWriter, r *http.Request) {
@@ -224,7 +234,7 @@ func (s *Server) sendChatMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, treeID, ok := s.startChatRun(w, r, body, content, msgs)
+	resp, treeID, ok := s.startChatRun(w, r, id, body, content, msgs)
 	if !ok {
 		return
 	}
@@ -242,7 +252,7 @@ func (s *Server) sendChatMessage(w http.ResponseWriter, r *http.Request) {
 // startChatRun starts the run that writes a reply to content, with the
 // conversation in msgs as its history. It has written the error response
 // when ok is false.
-func (s *Server) startChatRun(w http.ResponseWriter, r *http.Request, body chatMessageRequest, content string, msgs []store.ChatMessage) (map[string]any, uuid.UUID, bool) {
+func (s *Server) startChatRun(w http.ResponseWriter, r *http.Request, chatID uuid.UUID, body chatMessageRequest, content string, msgs []store.ChatMessage) (map[string]any, uuid.UUID, bool) {
 	req := createRequest{Prompt: content, Model: body.Model, FetchURLs: body.FetchURLs == nil || *body.FetchURLs, softFetch: true, SourceCheck: body.SourceCheck}
 	switch {
 	case body.Search || body.SearchMode == "on":
@@ -265,6 +275,12 @@ func (s *Server) startChatRun(w http.ResponseWriter, r *http.Request, body chatM
 		}
 	}
 	history, dropped := chatHistory(msgs, agent.MaxReferenceChars(s.contextLength(model))*3/4)
+	docs, err := store.ChatDocuments(r.Context(), s.db, chatID, true)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return nil, uuid.Nil, false
+	}
+	docMode := s.useDocuments(&req, docs, model, history)
 	resp, treeID, err := s.startRun(r.Context(), req, history, r.RemoteAddr)
 	if err != nil {
 		s.writeRunError(w, err)
@@ -273,7 +289,214 @@ func (s *Server) startChatRun(w http.ResponseWriter, r *http.Request, body chatM
 	if dropped > 0 {
 		resp["history_note"] = fmt.Sprintf("the %d oldest messages were left out to fit the model's context", dropped)
 	}
+	if docMode != "" {
+		resp["documents"] = map[string]any{"count": len(docs), "mode": docMode}
+	}
 	return resp, treeID, true
+}
+
+// Limits for chat documents.
+const (
+	maxChatDocuments = 10
+	maxDocumentBytes = 20 << 20  // one uploaded file
+	maxUploadBytes   = 64 << 20  // one upload request
+	maxDocumentChars = 1_000_000 // extracted text of one document (~250k tokens)
+	maxChatDocChars  = 2_000_000 // all of a chat's documents
+	inlineDocChars   = 24_000    // read whole when no safe chunk size is known
+	partNoteText     = "This item is part of the documents the user attached to the conversation. Answer the user's message above from this item only, naming the document and quoting or citing the passages you use. If this item has nothing relevant to the message, reply only: Nothing relevant in this part."
+)
+
+// useDocuments makes a chat run use the conversation's documents. Small
+// ones (within the worker model's safe chunk size, and half the reference
+// budget) go into the reference with the history, so every agent reads
+// them whole. Larger ones become parts split at the safe chunk size, one
+// agent each, merged by the model: the lossless path (experiments/chunking
+// v3). It returns the mode used, or "".
+func (s *Server) useDocuments(req *createRequest, docs []store.ChatDocument, model string, history []settings.Turn) string {
+	if len(docs) == 0 {
+		return ""
+	}
+	chunkTokens := 0
+	if m, ok := s.registry.Get(model); ok {
+		chunkTokens = m.ChunkTokens
+	}
+	inline := inlineDocChars
+	if chunkTokens > 0 {
+		inline = chunkTokens * 4
+	}
+	inline = min(inline, agent.MaxReferenceChars(s.contextLength(model))/2)
+	total := 0
+	for _, d := range docs {
+		total += len(d.Text)
+	}
+	if total <= inline {
+		req.documents = docs
+		return "whole"
+	}
+	for _, d := range docs {
+		req.Parts = append(req.Parts, agent.Part{Title: d.Name, Text: d.Text})
+	}
+	if chunkTokens > 0 {
+		req.MaxPartTokens = chunkTokens * 4 / 3 // parts are sized at chars/3
+	}
+	req.Merge = "llm"
+	req.Search, req.SearchAuto = false, false // the question is about the documents
+	req.partNote = partNoteText
+	if recent := recentTurns(history, 2, 600); recent != "" {
+		req.partNote = "Earlier in the conversation (for context):\n" + recent + "\n" + partNoteText
+	}
+	return "parts"
+}
+
+// recentTurns renders the last n exchanges, each message shortened to max
+// characters, for agents that read one part of a document.
+func recentTurns(history []settings.Turn, n, max int) string {
+	if len(history) > 2*n {
+		history = history[len(history)-2*n:]
+	}
+	var b strings.Builder
+	for _, t := range history {
+		who := "User"
+		if t.Role == "assistant" {
+			who = "Assistant"
+		}
+		text := t.Content
+		if len(text) > max {
+			text = strings.ToValidUTF8(text[:max], "") + "…"
+		}
+		fmt.Fprintf(&b, "%s: %s\n", who, text)
+	}
+	return b.String()
+}
+
+// uploadChatDocuments extracts text from uploaded files (multipart field
+// "files", one or more) and stores it with the conversation. Files that
+// cannot be read are reported one by one; the others are kept.
+func (s *Server) uploadChatDocuments(w http.ResponseWriter, r *http.Request) {
+	id, ok := chatID(w, r)
+	if !ok {
+		return
+	}
+	if _, err := store.GetConversation(r.Context(), s.db, id, auth.Principal(r.Context())); errors.Is(err, store.ErrNotFound) {
+		httpError(w, http.StatusNotFound, "chat not found")
+		return
+	} else if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	existing, err := store.ChatDocuments(r.Context(), s.db, id, false)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	count, chars := len(existing), 0
+	for _, d := range existing {
+		chars += d.Chars
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
+	reader, err := r.MultipartReader()
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "send the files as multipart/form-data in the field \"files\"")
+		return
+	}
+	type failure struct {
+		Name  string `json:"name"`
+		Error string `json:"error"`
+	}
+	added, failed := []store.ChatDocument{}, []failure{}
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			httpError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("the upload is too large or broken (at most %d MB per upload): %v", maxUploadBytes>>20, err))
+			return
+		}
+		if part.FormName() != "files" || part.FileName() == "" {
+			part.Close()
+			continue
+		}
+		name := documentName(part.FileName())
+		data, err := io.ReadAll(io.LimitReader(part, maxDocumentBytes+1))
+		part.Close()
+		switch {
+		case err != nil:
+			failed = append(failed, failure{name, "could not read the upload: " + err.Error()})
+			continue
+		case len(data) > maxDocumentBytes:
+			failed = append(failed, failure{name, fmt.Sprintf("larger than %d MB", maxDocumentBytes>>20)})
+			continue
+		case count >= maxChatDocuments:
+			failed = append(failed, failure{name, fmt.Sprintf("a chat holds at most %d documents; remove one first", maxChatDocuments)})
+			continue
+		}
+		kind, text, err := extract.Text(name, data)
+		if err != nil {
+			failed = append(failed, failure{name, err.Error()})
+			continue
+		}
+		if len(text) > maxDocumentChars {
+			failed = append(failed, failure{name, fmt.Sprintf("too long: %d characters of text, the limit is %d (about %dk tokens)", len(text), maxDocumentChars, maxDocumentChars/4000)})
+			continue
+		}
+		if chars+len(text) > maxChatDocChars {
+			failed = append(failed, failure{name, fmt.Sprintf("the chat's documents would exceed %d characters; remove one first", maxChatDocChars)})
+			continue
+		}
+		d, err := store.AddChatDocument(r.Context(), s.db, id, name, kind, text)
+		if err != nil {
+			httpError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		count, chars = count+1, chars+len(text)
+		added = append(added, *d)
+		s.log.Info("chat document added", "chat", id, "name", name, "kind", kind, "bytes", len(data), "chars", len(text))
+	}
+	if len(added) == 0 && len(failed) == 0 {
+		httpError(w, http.StatusBadRequest, "no files in the upload (field \"files\")")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"documents": added, "errors": failed})
+}
+
+// documentName keeps a file name's last element, trimmed to a sane length.
+func documentName(n string) string {
+	n = strings.TrimSpace(path.Base(strings.ReplaceAll(n, "\\", "/")))
+	if n == "" || n == "." || n == "/" {
+		n = "document"
+	}
+	if len(n) > 200 {
+		n = strings.ToValidUTF8(n[:200], "")
+	}
+	return n
+}
+
+func (s *Server) deleteChatDocument(w http.ResponseWriter, r *http.Request) {
+	id, ok := chatID(w, r)
+	if !ok {
+		return
+	}
+	doc, err := uuid.Parse(r.PathValue("doc"))
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid document id")
+		return
+	}
+	if _, err := store.GetConversation(r.Context(), s.db, id, auth.Principal(r.Context())); errors.Is(err, store.ErrNotFound) {
+		httpError(w, http.StatusNotFound, "chat not found")
+		return
+	} else if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := store.DeleteChatDocument(r.Context(), s.db, id, doc); errors.Is(err, store.ErrNotFound) {
+		httpError(w, http.StatusNotFound, "document not found")
+		return
+	} else if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": doc, "deleted": true})
 }
 
 // retryChatMessage writes the last reply again, typically with search on
@@ -310,7 +533,7 @@ func (s *Server) retryChatMessage(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusConflict, "the reply is still being written; wait for it or stop it")
 		return
 	}
-	resp, treeID, ok := s.startChatRun(w, r, body, msgs[n-2].Content, msgs[:n-2])
+	resp, treeID, ok := s.startChatRun(w, r, id, body, msgs[n-2].Content, msgs[:n-2])
 	if !ok {
 		return
 	}
